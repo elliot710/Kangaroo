@@ -16,7 +16,21 @@
 */
 
 #include "Int.h"
+#if defined(__aarch64__) || defined(__arm64__)
+#include <arm_neon.h>
+// Define __m128i equivalent for ARM64 using NEON
+typedef int64x2_t __m128i;
+static inline __m128i _mm_slli_epi64(__m128i a, int imm) {
+    // Use vshlq_s64 which accepts a vector of shift amounts (variable shift)
+    int64x2_t shift = vdupq_n_s64(imm);
+    return vshlq_s64(a, shift);
+}
+static inline __m128i _mm_sub_epi64(__m128i a, __m128i b) {
+    return vsubq_s64(a, b);
+}
+#else
 #include <emmintrin.h>
+#endif
 #include <string.h>
 
 #define MAX(x,y) (((x)>(y))?(x):(y))

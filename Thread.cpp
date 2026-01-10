@@ -351,6 +351,12 @@ void Kangaroo::Process(TH_PARAM *params,std::string unit) {
   count = getCPUCount() + getGPUCount();
   t1 = Timer::get_tick();
   
+  // Final save on exit (including signal-triggered exit)
+  // Use direct save since threads may not respond to coordination
+  if(workFile.length() > 0) {
+    SaveWorkDirect(count + offsetCount, t1 - startTime + offsetTime);
+  }
+  
   if( !endOfSearch ) {
     printf("\r[%.2f %s][GPU %.2f %s][Cnt 2^%.2f][%s]  ",
       avgKeyRate / 1000000.0,unit.c_str(),

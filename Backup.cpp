@@ -406,6 +406,41 @@ void  Kangaroo::SaveWork(string fileName,FILE *f,int type,uint64_t totalCount,do
 
 }
 
+void Kangaroo::SaveWorkDirect(uint64_t totalCount, double totalTime) {
+  // Direct save without thread coordination - used on shutdown
+  if(workFile.length() == 0) return;
+  
+  string fileName = workFile;
+  if(splitWorkfile)
+    fileName = workFile + "_" + Timer::getTS();
+  
+  FILE *f = fopen(fileName.c_str(), "wb");
+  if(f == NULL) {
+    ::printf("\nSaveWorkDirect: Cannot open %s for writing\n", fileName.c_str());
+    return;
+  }
+  
+  ::printf("\nSaveWorkDirect: %s", fileName.c_str());
+  
+  // Save header
+  if(!SaveHeader(fileName, f, HEADW, totalCount, totalTime)) {
+    fclose(f);
+    return;
+  }
+  
+  // Save hash table (distinguished points)
+  hashTable.SaveTable(f);
+  
+  // Write zero kangaroo count (we're not saving kangaroo positions)
+  uint64_t totalWalk = 0;
+  ::fwrite(&totalWalk, sizeof(uint64_t), 1, f);
+  
+  uint64_t size = FTell(f);
+  fclose(f);
+  
+  ::printf(" [%.1f MB] [%s]\n", (double)size / (1024.0 * 1024.0), Timer::getTS().c_str());
+}
+
 void Kangaroo::SaveServerWork() {
 
   saveRequest = true;
@@ -588,7 +623,7 @@ void Kangaroo::WorkInfo(std::string &fName) {
   if(f1 == NULL)
     return;
 
-#ifndef WIN64
+#if !defined(WIN64) && !defined(__APPLE__)
   int fd = fileno(f1);
   posix_fadvise(fd,0,0,POSIX_FADV_RANDOM|POSIX_FADV_NOREUSE);
 #endif
