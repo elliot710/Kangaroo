@@ -475,7 +475,7 @@ void Kangaroo::SaveServerWork() {
   char *ctimeBuff;
   time_t now = time(NULL);
   ctimeBuff = ctime(&now);
-  ::printf("done [%.1f MB] [%s] %s",(double)size / (1024.0*1024.0),GetTimeStr(t1 - t0).c_str(),ctimeBuff);
+  ::printf(" done [%.1f MB] [%s] %s",(double)size / (1024.0*1024.0),GetTimeStr(t1 - t0).c_str(),ctimeBuff);
 
   saveRequest = false;
 
@@ -602,7 +602,7 @@ end:
   char *ctimeBuff;
   time_t now = time(NULL);
   ctimeBuff = ctime(&now);
-  ::printf("done [%.1f MB] [%s] %s",(double)size/(1024.0*1024.0),GetTimeStr(t1 - t0).c_str(),ctimeBuff);
+  ::printf(" done [%.1f MB] [%s] %s",(double)size/(1024.0*1024.0),GetTimeStr(t1 - t0).c_str(),ctimeBuff);
 
 }
 

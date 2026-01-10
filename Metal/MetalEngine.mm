@@ -214,14 +214,28 @@ bool MetalEngine::CreatePipelines() {
         }
         
         if (!library) {
-            // Try to compile from source
-            NSString* shaderPath = @"Metal/KangarooKernel.metal";
+            // Try to compile from source - prefer Fast kernel with fully unrolled arithmetic
+            NSString* shaderPath = @"Metal/KangarooKernelFast.metal";
             NSString* shaderSource = [NSString stringWithContentsOfFile:shaderPath
                                                                encoding:NSUTF8StringEncoding
                                                                   error:&error];
             
             if (!shaderSource) {
-                // Try current directory
+                shaderPath = @"./KangarooKernelFast.metal";
+                shaderSource = [NSString stringWithContentsOfFile:shaderPath
+                                                         encoding:NSUTF8StringEncoding
+                                                            error:&error];
+            }
+            
+            // Fallback to original kernel
+            if (!shaderSource) {
+                shaderPath = @"Metal/KangarooKernel.metal";
+                shaderSource = [NSString stringWithContentsOfFile:shaderPath
+                                                               encoding:NSUTF8StringEncoding
+                                                                  error:&error];
+            }
+            
+            if (!shaderSource) {
                 shaderPath = @"./KangarooKernel.metal";
                 shaderSource = [NSString stringWithContentsOfFile:shaderPath
                                                          encoding:NSUTF8StringEncoding
