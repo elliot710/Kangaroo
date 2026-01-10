@@ -19,7 +19,9 @@
 #include "IntGroup.h"
 #include <string.h>
 #include <math.h>
+#if !defined(__aarch64__) && !defined(__arm64__)
 #include <emmintrin.h>
+#endif
 #include "../Timer.h"
 
 #define MAX(x,y) (((x)>(y))?(x):(y))

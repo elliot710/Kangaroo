@@ -41,7 +41,13 @@ typedef int SOCKET;
 #include "SECPK1/SECP256k1.h"
 #include "HashTable.h"
 #include "SECPK1/IntGroup.h"
+#ifdef WITHMETAL
+#include "Metal/MetalEngine.h"
+// Define GPUEngine as alias to MetalEngine for compatibility
+typedef MetalEngine GPUEngine;
+#else
 #include "GPU/GPUEngine.h"
+#endif
 
 #ifdef WIN64
 typedef HANDLE THREAD_HANDLE;
@@ -131,6 +137,10 @@ public:
   Kangaroo(Secp256K1 *secp,int32_t initDPSize,bool useGpu,std::string &workFile,std::string &iWorkFile,
            uint32_t savePeriod,bool saveKangaroo,bool saveKangarooByServer,double maxStep,int wtimeout,int sport,int ntimeout,
            std::string serverIp,std::string outputFile,bool splitWorkfile);
+  
+  // Method to stop the search (for signal handlers)
+  void StopSearch() { endOfSearch = true; }
+  
   void Run(int nbThread,std::vector<int> gpuId,std::vector<int> gridSize);
   void RunServer();
   bool ParseConfigFile(std::string &fileName);
@@ -179,6 +189,7 @@ private:
   // Backup stuff
   void SaveWork(std::string fileName,FILE *f,int type,uint64_t totalCount,double totalTime);
   void SaveWork(uint64_t totalCount,double totalTime,TH_PARAM *threads,int nbThread);
+  void SaveWorkDirect(uint64_t totalCount, double totalTime);  // Direct save without thread coordination
   void SaveServerWork();
   void FetchWalks(uint64_t nbWalk,Int *x,Int *y,Int *d);
   void FetchWalks(uint64_t nbWalk,std::vector<int128_t>& kangs,Int* x,Int* y,Int* d);

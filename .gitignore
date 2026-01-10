@@ -12,3 +12,5 @@ CMakeLists.txt
 kangaroo
 cmake-build-debug/
 *.prf
+puzzle135_work.dat
+puzzle135.txt

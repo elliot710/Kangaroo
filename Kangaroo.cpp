@@ -198,6 +198,21 @@ bool Kangaroo::Output(Int *pk,char sInfo,int sType) {
   ::fprintf(f,"Key#%2d [%d%c]Pub:  0x%s \n",keyIdx,sType,sInfo,secp->GetPublicKeyHex(true,keysToSearch[keyIdx]).c_str());
   if(PR.equals(keysToSearch[keyIdx])) {
     ::fprintf(f,"       Priv: 0x%s \n",pk->GetBase16().c_str());
+    
+    // Always save the found key to a dedicated file
+    FILE* keyFile = fopen("KEYFOUND.txt", "a");
+    if(keyFile != NULL) {
+      time_t now = time(NULL);
+      char timeStr[64];
+      strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", localtime(&now));
+      ::fprintf(keyFile, "=== KEY FOUND ===\n");
+      ::fprintf(keyFile, "Time: %s\n", timeStr);
+      ::fprintf(keyFile, "Public Key: 0x%s\n", secp->GetPublicKeyHex(true, keysToSearch[keyIdx]).c_str());
+      ::fprintf(keyFile, "Private Key: 0x%s\n", pk->GetBase16().c_str());
+      ::fprintf(keyFile, "================\n\n");
+      fclose(keyFile);
+      ::printf("\n*** PRIVATE KEY SAVED TO KEYFOUND.txt ***\n");
+    }
   } else {
     ::fprintf(f,"       Failed !\n");
     if(needToClose)
@@ -537,11 +552,18 @@ void Kangaroo::SolveKeyGPU(TH_PARAM *ph) {
     ph->py = new Int[ph->nbKangaroo];
     ph->distance = new Int[ph->nbKangaroo];
 
-    for(uint64_t i = 0; i<nbThread; i++) {
+    for(uint64_t i = 0; i<nbThread && !endOfSearch; i++) {
       CreateHerd(GPU_GRP_SIZE,&(ph->px[i*GPU_GRP_SIZE]),
                               &(ph->py[i*GPU_GRP_SIZE]),
                               &(ph->distance[i*GPU_GRP_SIZE]),
                               TAME);
+    }
+    
+    // Check if we were interrupted during creation
+    if(endOfSearch) {
+      delete gpu;
+      ph->isRunning = false;
+      return;
     }
   }
 

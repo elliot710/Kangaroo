@@ -1,0 +1,70 @@
+# Makefile for Kangaroo CPU-only (macOS ARM64)
+# This version is stable and interruptible
+#
+# Usage:
+#   make -f Makefile.cpu          # Build CPU-only version
+#   make -f Makefile.cpu clean    # Clean build files
+
+# Compiler settings
+CXX = clang++
+
+# Flags - NO GPU
+CXXFLAGS = -O3 -std=c++17 -Wall -Wextra
+LDFLAGS = -lpthread
+
+# Directories
+SRCDIR = .
+SECPDIR = SECPK1
+OBJDIR = obj_cpu
+
+# Source files
+SRCS = main.cpp \
+       Kangaroo.cpp \
+       Thread.cpp \
+       HashTable.cpp \
+       Timer.cpp \
+       Check.cpp \
+       Network.cpp \
+       Backup.cpp \
+       Merge.cpp \
+       PartMerge.cpp
+
+SECP_SRCS = $(SECPDIR)/Int.cpp \
+            $(SECPDIR)/IntGroup.cpp \
+            $(SECPDIR)/IntMod.cpp \
+            $(SECPDIR)/Point.cpp \
+            $(SECPDIR)/Random.cpp \
+            $(SECPDIR)/SECP256K1.cpp
+
+# Object files
+OBJS = $(patsubst %.cpp,$(OBJDIR)/%.o,$(notdir $(SRCS)))
+SECP_OBJS = $(patsubst %.cpp,$(OBJDIR)/%.o,$(notdir $(SECP_SRCS)))
+
+# Target
+TARGET = KangarooCPU
+
+# Default target
+all: $(OBJDIR) $(TARGET)
+
+# Create object directory
+$(OBJDIR):
+	mkdir -p $(OBJDIR)
+
+# Compile C++ sources
+$(OBJDIR)/%.o: $(SRCDIR)/%.cpp | $(OBJDIR)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# Compile SECP256K1 sources
+$(OBJDIR)/%.o: $(SECPDIR)/%.cpp | $(OBJDIR)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# Link
+$(TARGET): $(OBJS) $(SECP_OBJS)
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o $@ $^
+
+# Clean
+clean:
+	rm -rf $(OBJDIR)
+	rm -f $(TARGET)
+
+.PHONY: all clean

@@ -18,13 +18,37 @@
 #include "Kangaroo.h"
 #include "Timer.h"
 #include "SECPK1/SECP256k1.h"
+#ifdef WITHMETAL
+// MetalEngine is included via Kangaroo.h
+#else
 #include "GPU/GPUEngine.h"
+#endif
 #include <fstream>
 #include <string>
 #include <string.h>
 #include <stdexcept>
+#include <signal.h>
+#include <atomic>
 
 using namespace std;
+
+// Global pointer for signal handler access
+Kangaroo *g_kangaroo = nullptr;
+static std::atomic<int> g_signalCount(0);
+
+// Signal handler for graceful shutdown
+void mainSignalHandler(int sig) {
+    g_signalCount++;
+    if (g_kangaroo) {
+        g_kangaroo->StopSearch();
+    }
+    if (g_signalCount == 1) {
+        ::printf("\nReceived signal %d, shutting down... (press Ctrl+C again to force quit)\n", sig);
+    } else {
+        ::printf("\nForce quit!\n");
+        _exit(1);
+    }
+}
 
 #define CHECKARG(opt,n) if(a>=argc-1) {::printf(opt " missing argument #%d\n",n);exit(0);} else {a++;}
 
@@ -165,6 +189,10 @@ static string outputFile = "";
 static bool splitWorkFile = false;
 
 int main(int argc, char* argv[]) {
+
+  // Install signal handlers for graceful shutdown
+  signal(SIGINT, mainSignalHandler);
+  signal(SIGTERM, mainSignalHandler);
 
 #ifdef USE_SYMMETRY
   printf("Kangaroo v" RELEASE " (with symmetry)\n");
@@ -320,6 +348,7 @@ int main(int argc, char* argv[]) {
 
   Kangaroo *v = new Kangaroo(secp,dp,gpuEnable,workFile,iWorkFile,savePeriod,saveKangaroo,saveKangarooByServer,
                              maxStep,wtimeout,port,ntimeout,serverIP,outputFile,splitWorkFile);
+  g_kangaroo = v;  // Set global pointer for signal handler
   if(checkFlag) {
     v->Check(gpuId,gridSize);  
     exit(0);

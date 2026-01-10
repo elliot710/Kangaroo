@@ -213,7 +213,51 @@ private:
 
 #ifndef WIN64
 
-// Missing intrinsics
+#if defined(__aarch64__) || defined(__arm64__)
+
+// ARM64 / Apple Silicon implementation using __uint128_t
+static uint64_t inline _umul128(uint64_t a, uint64_t b, uint64_t *h) {
+  __uint128_t result = (__uint128_t)a * (__uint128_t)b;
+  *h = (uint64_t)(result >> 64);
+  return (uint64_t)result;
+}
+
+static int64_t inline _mul128(int64_t a, int64_t b, int64_t *h) {
+  __int128_t result = (__int128_t)a * (__int128_t)b;
+  *h = (int64_t)(result >> 64);
+  return (int64_t)result;
+}
+
+static uint64_t inline _udiv128(uint64_t hi, uint64_t lo, uint64_t d, uint64_t *r) {
+  __uint128_t dividend = ((__uint128_t)hi << 64) | lo;
+  *r = (uint64_t)(dividend % d);
+  return (uint64_t)(dividend / d);
+}
+
+static uint64_t inline __rdtsc() {
+  uint64_t val;
+  // Use ARM64 counter register
+  __asm__ volatile("mrs %0, cntvct_el0" : "=r"(val));
+  return val;
+}
+
+// ARM64 add with carry (returns carry out)
+static inline unsigned char _addcarry_u64(unsigned char c_in, uint64_t a, uint64_t b, uint64_t *out) {
+  __uint128_t sum = (__uint128_t)a + (__uint128_t)b + (__uint128_t)c_in;
+  *out = (uint64_t)sum;
+  return (unsigned char)(sum >> 64);
+}
+
+// ARM64 subtract with borrow (returns borrow out)
+static inline unsigned char _subborrow_u64(unsigned char b_in, uint64_t a, uint64_t b, uint64_t *out) {
+  __uint128_t result = (__uint128_t)a - (__uint128_t)b - (__uint128_t)b_in;
+  *out = (uint64_t)result;
+  return (result >> 64) ? 1 : 0;
+}
+
+#else
+
+// x86-64 implementation using inline assembly
 static uint64_t inline _umul128(uint64_t a, uint64_t b, uint64_t *h) {
   uint64_t rhi;
   uint64_t rlo;
@@ -245,12 +289,14 @@ static uint64_t inline __rdtsc() {
   return (uint64_t)h << 32 | (uint64_t)l;
 }
 
+#define _subborrow_u64(a,b,c,d) __builtin_ia32_sbb_u64(a,b,c,(long long unsigned int*)d);
+#define _addcarry_u64(a,b,c,d) __builtin_ia32_addcarryx_u64(a,b,c,(long long unsigned int*)d);
+
+#endif // __aarch64__
+
 #define __shiftright128(a,b,n) ((a)>>(n))|((b)<<(64-(n)))
 #define __shiftleft128(a,b,n) ((b)<<(n))|((a)>>(64-(n)))
 
-
-#define _subborrow_u64(a,b,c,d) __builtin_ia32_sbb_u64(a,b,c,(long long unsigned int*)d);
-#define _addcarry_u64(a,b,c,d) __builtin_ia32_addcarryx_u64(a,b,c,(long long unsigned int*)d);
 #define _byteswap_uint64 __builtin_bswap64
 #define LZC(x) __builtin_clzll(x)
 #define TZC(x) __builtin_ctzll(x)
