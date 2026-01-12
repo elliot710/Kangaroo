@@ -1,12 +1,7 @@
 /*
- * Metal Shader for Pollard's Kangaroo Algorithm - FAST VERSION
- * 
- * Key Optimizations:
- * 1. Fully unrolled 256-bit multiplication (no loops)
- * 2. Optimized carry propagation
- * 3. Reduced register pressure
- * 4. Streamlined modular reduction
- * 
+ * Metal Shader for Pollard's Kangaroo Algorithm
+ * Fixed version with correct 256-bit arithmetic
+ *
  * Copyright (c) 2024
  * Licensed under GNU General Public License v3.0
  */
@@ -15,7 +10,7 @@
 using namespace metal;
 
 // ---------------------------------------------------------------------------------
-// Constants - Must match Constants.h
+// Constants
 // ---------------------------------------------------------------------------------
 
 #define NB_JUMP 32
@@ -23,7 +18,7 @@ using namespace metal;
 #define NB_RUN 8
 #define KSIZE 10
 
-// SECP256K1 field prime constants
+// SECP256K1 field prime: p = 2^256 - 2^32 - 977
 #define P0 0xFFFFFFFEFFFFFC2FULL
 #define P1 0xFFFFFFFFFFFFFFFFULL
 #define P2 0xFFFFFFFFFFFFFFFFULL
@@ -33,7 +28,15 @@ using namespace metal;
 #define REDUCTION_C 0x1000003D1ULL
 
 // ---------------------------------------------------------------------------------
-// Optimized 64x64 -> 128 bit multiplication
+// 256-bit integer type
+// ---------------------------------------------------------------------------------
+
+struct U256 {
+    uint64_t d0, d1, d2, d3;
+};
+
+// ---------------------------------------------------------------------------------
+// 64x64 -> 128 bit multiplication
 // ---------------------------------------------------------------------------------
 
 inline void mul64(uint64_t a, uint64_t b, thread uint64_t& hi, thread uint64_t& lo) {
@@ -57,298 +60,39 @@ inline void mul64(uint64_t a, uint64_t b, thread uint64_t& hi, thread uint64_t& 
 }
 
 // ---------------------------------------------------------------------------------
-// 256-bit integer type
-// ---------------------------------------------------------------------------------
-
-struct U256 {
-    uint64_t d0, d1, d2, d3;
-};
-
-// ---------------------------------------------------------------------------------
-// FULLY UNROLLED modular multiplication
-// This eliminates all loop overhead and allows better instruction scheduling
-// ---------------------------------------------------------------------------------
-
-inline void modMult(thread U256& r, thread const U256& a, thread const U256& b) {
-    uint64_t p0, p1, p2, p3, p4, p5, p6, p7;
-    uint64_t hi, lo, c;
-    
-    // Column 0: a0*b0
-    mul64(a.d0, b.d0, hi, p0);
-    p1 = hi; p2 = p3 = p4 = p5 = p6 = p7 = 0;
-    
-    // Column 1: a0*b1 + a1*b0
-    mul64(a.d0, b.d1, hi, lo);
-    p1 += lo; c = (p1 < lo) ? 1ULL : 0;
-    p2 = hi + c;
-    
-    mul64(a.d1, b.d0, hi, lo);
-    p1 += lo; c = (p1 < lo) ? 1ULL : 0;
-    p2 += hi + c; c = (p2 < hi + c) ? 1ULL : 0;
-    p3 = c;
-    
-    // Column 2: a0*b2 + a1*b1 + a2*b0
-    mul64(a.d0, b.d2, hi, lo);
-    p2 += lo; c = (p2 < lo) ? 1ULL : 0;
-    p3 += hi + c;
-    
-    mul64(a.d1, b.d1, hi, lo);
-    p2 += lo; c = (p2 < lo) ? 1ULL : 0;
-    p3 += hi + c; c = (p3 < hi + c) ? 1ULL : 0;
-    p4 = c;
-    
-    mul64(a.d2, b.d0, hi, lo);
-    p2 += lo; c = (p2 < lo) ? 1ULL : 0;
-    p3 += hi + c; c = (p3 < hi + c) ? 1ULL : 0;
-    p4 += c;
-    
-    // Column 3: a0*b3 + a1*b2 + a2*b1 + a3*b0
-    mul64(a.d0, b.d3, hi, lo);
-    p3 += lo; c = (p3 < lo) ? 1ULL : 0;
-    p4 += hi + c; c = (p4 < hi + c) ? 1ULL : 0;
-    p5 = c;
-    
-    mul64(a.d1, b.d2, hi, lo);
-    p3 += lo; c = (p3 < lo) ? 1ULL : 0;
-    p4 += hi + c; c = (p4 < hi + c) ? 1ULL : 0;
-    p5 += c;
-    
-    mul64(a.d2, b.d1, hi, lo);
-    p3 += lo; c = (p3 < lo) ? 1ULL : 0;
-    p4 += hi + c; c = (p4 < hi + c) ? 1ULL : 0;
-    p5 += c;
-    
-    mul64(a.d3, b.d0, hi, lo);
-    p3 += lo; c = (p3 < lo) ? 1ULL : 0;
-    p4 += hi + c; c = (p4 < hi + c) ? 1ULL : 0;
-    p5 += c;
-    
-    // Column 4: a1*b3 + a2*b2 + a3*b1
-    mul64(a.d1, b.d3, hi, lo);
-    p4 += lo; c = (p4 < lo) ? 1ULL : 0;
-    p5 += hi + c; c = (p5 < hi + c) ? 1ULL : 0;
-    p6 = c;
-    
-    mul64(a.d2, b.d2, hi, lo);
-    p4 += lo; c = (p4 < lo) ? 1ULL : 0;
-    p5 += hi + c; c = (p5 < hi + c) ? 1ULL : 0;
-    p6 += c;
-    
-    mul64(a.d3, b.d1, hi, lo);
-    p4 += lo; c = (p4 < lo) ? 1ULL : 0;
-    p5 += hi + c; c = (p5 < hi + c) ? 1ULL : 0;
-    p6 += c;
-    
-    // Column 5: a2*b3 + a3*b2
-    mul64(a.d2, b.d3, hi, lo);
-    p5 += lo; c = (p5 < lo) ? 1ULL : 0;
-    p6 += hi + c; c = (p6 < hi + c) ? 1ULL : 0;
-    p7 = c;
-    
-    mul64(a.d3, b.d2, hi, lo);
-    p5 += lo; c = (p5 < lo) ? 1ULL : 0;
-    p6 += hi + c; c = (p6 < hi + c) ? 1ULL : 0;
-    p7 += c;
-    
-    // Column 6: a3*b3
-    mul64(a.d3, b.d3, hi, lo);
-    p6 += lo; c = (p6 < lo) ? 1ULL : 0;
-    p7 += hi + c;
-    
-    // === REDUCTION ===
-    // r = p[0:3] + p[4:7] * c  where c = 2^32 + 977
-    
-    uint64_t t0, t1, t2, t3, t4;
-    
-    // t = p[4:7] * REDUCTION_C
-    mul64(p4, REDUCTION_C, hi, t0);
-    t1 = hi;
-    mul64(p5, REDUCTION_C, hi, lo);
-    t1 += lo; c = (t1 < lo) ? 1ULL : 0;
-    t2 = hi + c;
-    mul64(p6, REDUCTION_C, hi, lo);
-    t2 += lo; c = (t2 < lo) ? 1ULL : 0;
-    t3 = hi + c;
-    mul64(p7, REDUCTION_C, hi, lo);
-    t3 += lo; c = (t3 < lo) ? 1ULL : 0;
-    t4 = hi + c;
-    
-    // r = p[0:3] + t
-    p0 += t0; c = (p0 < t0) ? 1ULL : 0;
-    p1 += t1 + c; c = (p1 < t1 + c) ? 1ULL : 0;
-    p2 += t2 + c; c = (p2 < t2 + c) ? 1ULL : 0;
-    p3 += t3 + c; c = (p3 < t3 + c) ? 1ULL : 0;
-    t4 += c;
-    
-    // Second reduction for overflow
-    if (t4 > 0) {
-        mul64(t4, REDUCTION_C, hi, lo);
-        p0 += lo; c = (p0 < lo) ? 1ULL : 0;
-        p1 += hi + c; c = (p1 < hi + c) ? 1ULL : 0;
-        p2 += c; c = (p2 < c) ? 1ULL : 0;
-        p3 += c;
-    }
-    
-    r.d0 = p0; r.d1 = p1; r.d2 = p2; r.d3 = p3;
-    
-    // Final reduction if >= P
-    if (r.d3 > P3 || (r.d3 == P3 && (r.d2 > P2 || (r.d2 == P2 && (r.d1 > P1 || (r.d1 == P1 && r.d0 >= P0)))))) {
-        // Subtract P with proper borrow
-        uint64_t t0 = r.d0 - P0;
-        uint64_t b = (r.d0 < P0) ? 1ULL : 0;
-        uint64_t t1 = r.d1 - P1 - b;
-        b = (r.d1 < P1 + b) ? 1ULL : 0;
-        uint64_t t2 = r.d2 - P2 - b;
-        b = (r.d2 < P2 + b) ? 1ULL : 0;
-        uint64_t t3 = r.d3 - P3 - b;
-        r.d0 = t0; r.d1 = t1; r.d2 = t2; r.d3 = t3;
-    }
-}
-
-// ---------------------------------------------------------------------------------
-// FULLY UNROLLED modular squaring (faster than mult - uses symmetry)
-// ---------------------------------------------------------------------------------
-
-inline void modSqr(thread U256& r, thread const U256& a) {
-    uint64_t p0, p1, p2, p3, p4, p5, p6, p7;
-    uint64_t hi, lo, lo2, c;
-    
-    // Diagonal terms
-    mul64(a.d0, a.d0, hi, p0); p1 = hi;
-    mul64(a.d1, a.d1, hi, lo); p2 = lo; p3 = hi;
-    mul64(a.d2, a.d2, hi, lo); p4 = lo; p5 = hi;
-    mul64(a.d3, a.d3, hi, lo); p6 = lo; p7 = hi;
-    
-    // Off-diagonal (doubled): 2 * a[i] * a[j]
-    
-    // 2 * a0 * a1 -> p1, p2
-    mul64(a.d0, a.d1, hi, lo);
-    lo2 = lo << 1; hi = (hi << 1) | (lo >> 63);
-    p1 += lo2; c = (p1 < lo2) ? 1ULL : 0;
-    p2 += hi + c; c = (p2 < hi + c) ? 1ULL : 0;
-    p3 += c;
-    
-    // 2 * a0 * a2 -> p2, p3
-    mul64(a.d0, a.d2, hi, lo);
-    lo2 = lo << 1; hi = (hi << 1) | (lo >> 63);
-    p2 += lo2; c = (p2 < lo2) ? 1ULL : 0;
-    p3 += hi + c; c = (p3 < hi + c) ? 1ULL : 0;
-    p4 += c;
-    
-    // 2 * a0 * a3 -> p3, p4
-    mul64(a.d0, a.d3, hi, lo);
-    lo2 = lo << 1; hi = (hi << 1) | (lo >> 63);
-    p3 += lo2; c = (p3 < lo2) ? 1ULL : 0;
-    p4 += hi + c; c = (p4 < hi + c) ? 1ULL : 0;
-    p5 += c;
-    
-    // 2 * a1 * a2 -> p3, p4
-    mul64(a.d1, a.d2, hi, lo);
-    lo2 = lo << 1; hi = (hi << 1) | (lo >> 63);
-    p3 += lo2; c = (p3 < lo2) ? 1ULL : 0;
-    p4 += hi + c; c = (p4 < hi + c) ? 1ULL : 0;
-    p5 += c;
-    
-    // 2 * a1 * a3 -> p4, p5
-    mul64(a.d1, a.d3, hi, lo);
-    lo2 = lo << 1; hi = (hi << 1) | (lo >> 63);
-    p4 += lo2; c = (p4 < lo2) ? 1ULL : 0;
-    p5 += hi + c; c = (p5 < hi + c) ? 1ULL : 0;
-    p6 += c;
-    
-    // 2 * a2 * a3 -> p5, p6
-    mul64(a.d2, a.d3, hi, lo);
-    lo2 = lo << 1; hi = (hi << 1) | (lo >> 63);
-    p5 += lo2; c = (p5 < lo2) ? 1ULL : 0;
-    p6 += hi + c; c = (p6 < hi + c) ? 1ULL : 0;
-    p7 += c;
-    
-    // === REDUCTION ===
-    uint64_t t0, t1, t2, t3, t4;
-    
-    mul64(p4, REDUCTION_C, hi, t0); t1 = hi;
-    mul64(p5, REDUCTION_C, hi, lo);
-    t1 += lo; c = (t1 < lo) ? 1ULL : 0;
-    t2 = hi + c;
-    mul64(p6, REDUCTION_C, hi, lo);
-    t2 += lo; c = (t2 < lo) ? 1ULL : 0;
-    t3 = hi + c;
-    mul64(p7, REDUCTION_C, hi, lo);
-    t3 += lo; c = (t3 < lo) ? 1ULL : 0;
-    t4 = hi + c;
-    
-    p0 += t0; c = (p0 < t0) ? 1ULL : 0;
-    p1 += t1 + c; c = (p1 < t1 + c) ? 1ULL : 0;
-    p2 += t2 + c; c = (p2 < t2 + c) ? 1ULL : 0;
-    p3 += t3 + c; c = (p3 < t3 + c) ? 1ULL : 0;
-    t4 += c;
-    
-    if (t4 > 0) {
-        mul64(t4, REDUCTION_C, hi, lo);
-        p0 += lo; c = (p0 < lo) ? 1ULL : 0;
-        p1 += hi + c; c = (p1 < hi + c) ? 1ULL : 0;
-        p2 += c; c = (p2 < c) ? 1ULL : 0;
-        p3 += c;
-    }
-    
-    r.d0 = p0; r.d1 = p1; r.d2 = p2; r.d3 = p3;
-    
-    if (r.d3 > P3 || (r.d3 == P3 && (r.d2 > P2 || (r.d2 == P2 && (r.d1 > P1 || (r.d1 == P1 && r.d0 >= P0)))))) {
-        // Subtract P with proper borrow
-        uint64_t t0 = r.d0 - P0;
-        uint64_t b = (r.d0 < P0) ? 1ULL : 0;
-        uint64_t t1 = r.d1 - P1 - b;
-        b = (r.d1 < P1 + b) ? 1ULL : 0;
-        uint64_t t2 = r.d2 - P2 - b;
-        b = (r.d2 < P2 + b) ? 1ULL : 0;
-        uint64_t t3 = r.d3 - P3 - b;
-        r.d0 = t0; r.d1 = t1; r.d2 = t2; r.d3 = t3;
-    }
-}
-
-// ---------------------------------------------------------------------------------
-// Modular subtraction - Fixed borrow detection
+// Modular subtraction with correct borrow handling
+// Uses the mask trick from CUDA: after subtraction, borrow flag is used to mask P
 // ---------------------------------------------------------------------------------
 
 inline void modSub(thread U256& r, thread const U256& a, thread const U256& b) {
-    uint64_t borrow = 0;
-    
-    // d0
+    // First compute a - b
     uint64_t t0 = a.d0 - b.d0;
-    borrow = (a.d0 < b.d0) ? 1ULL : 0;
+    uint64_t b0 = (a.d0 < b.d0) ? 1ULL : 0;
     
-    // d1
-    uint64_t t1 = a.d1 - b.d1;
-    uint64_t b1 = (a.d1 < b.d1) ? 1ULL : 0;
-    uint64_t t1b = t1 - borrow;
-    b1 |= (t1 < borrow) ? 1ULL : 0;
+    uint64_t t1 = a.d1 - b.d1 - b0;
+    uint64_t b1 = (a.d1 < b.d1) ? 1ULL : ((a.d1 == b.d1 && b0) ? 1ULL : 0);
     
-    // d2
-    uint64_t t2 = a.d2 - b.d2;
-    uint64_t b2 = (a.d2 < b.d2) ? 1ULL : 0;
-    uint64_t t2b = t2 - b1;
-    b2 |= (t2 < b1) ? 1ULL : 0;
+    uint64_t t2 = a.d2 - b.d2 - b1;
+    uint64_t b2 = (a.d2 < b.d2) ? 1ULL : ((a.d2 == b.d2 && b1) ? 1ULL : 0);
     
-    // d3
-    uint64_t t3 = a.d3 - b.d3;
-    uint64_t b3 = (a.d3 < b.d3) ? 1ULL : 0;
-    uint64_t t3b = t3 - b2;
-    b3 |= (t3 < b2) ? 1ULL : 0;
+    uint64_t t3 = a.d3 - b.d3 - b2;
+    uint64_t b3 = (a.d3 < b.d3) ? 1ULL : ((a.d3 == b.d3 && b2) ? 1ULL : 0);
     
-    r.d0 = t0; r.d1 = t1b; r.d2 = t2b; r.d3 = t3b;
+    // If borrow, add P back using mask
+    uint64_t mask = b3 ? 0xFFFFFFFFFFFFFFFFULL : 0;
     
-    if (b3) {
-        // Add P back
-        uint64_t c = 0;
-        uint64_t s0 = r.d0 + P0;
-        c = (s0 < r.d0) ? 1ULL : 0;
-        uint64_t s1 = r.d1 + P1 + c;
-        c = (s1 < r.d1 || (c && s1 == r.d1)) ? 1ULL : 0;
-        uint64_t s2 = r.d2 + P2 + c;
-        c = (s2 < r.d2 || (c && s2 == r.d2)) ? 1ULL : 0;
-        uint64_t s3 = r.d3 + P3 + c;
-        r.d0 = s0; r.d1 = s1; r.d2 = s2; r.d3 = s3;
-    }
+    uint64_t s0 = t0 + (P0 & mask);
+    uint64_t c0 = (s0 < t0) ? 1ULL : 0;
+    
+    uint64_t s1 = t1 + (P1 & mask) + c0;
+    uint64_t c1 = (s1 < t1) ? 1ULL : ((s1 == t1 && c0) ? 1ULL : 0);
+    
+    uint64_t s2 = t2 + (P2 & mask) + c1;
+    uint64_t c2 = (s2 < t2) ? 1ULL : ((s2 == t2 && c1) ? 1ULL : 0);
+    
+    uint64_t s3 = t3 + (P3 & mask) + c2;
+    
+    r.d0 = s0; r.d1 = s1; r.d2 = s2; r.d3 = s3;
 }
 
 inline void modSubInPlace(thread U256& r, thread const U256& b) {
@@ -357,7 +101,232 @@ inline void modSubInPlace(thread U256& r, thread const U256& b) {
 }
 
 // ---------------------------------------------------------------------------------
-// Modular inverse using optimized addition chain for secp256k1
+// Modular multiplication with 512-bit intermediate
+// ---------------------------------------------------------------------------------
+
+inline void modMult(thread U256& r, thread const U256& a, thread const U256& b) {
+    uint64_t p[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    uint64_t hi, lo;
+    
+    // Schoolbook multiplication: compute 512-bit product
+    // Column 0
+    mul64(a.d0, b.d0, hi, p[0]);
+    p[1] = hi;
+    
+    // Column 1
+    mul64(a.d0, b.d1, hi, lo);
+    p[1] += lo; uint64_t c = (p[1] < lo) ? 1ULL : 0;
+    p[2] = hi + c;
+    
+    mul64(a.d1, b.d0, hi, lo);
+    p[1] += lo; c = (p[1] < lo) ? 1ULL : 0;
+    p[2] += hi + c; c = (p[2] < hi + c) ? 1ULL : 0;
+    p[3] = c;
+    
+    // Column 2
+    mul64(a.d0, b.d2, hi, lo);
+    p[2] += lo; c = (p[2] < lo) ? 1ULL : 0;
+    p[3] += hi + c; c = (p[3] < hi + c) ? 1ULL : 0;
+    p[4] = c;
+    
+    mul64(a.d1, b.d1, hi, lo);
+    p[2] += lo; c = (p[2] < lo) ? 1ULL : 0;
+    p[3] += hi + c; c = (p[3] < hi + c) ? 1ULL : 0;
+    p[4] += c;
+    
+    mul64(a.d2, b.d0, hi, lo);
+    p[2] += lo; c = (p[2] < lo) ? 1ULL : 0;
+    p[3] += hi + c; c = (p[3] < hi + c) ? 1ULL : 0;
+    p[4] += c;
+    
+    // Column 3
+    mul64(a.d0, b.d3, hi, lo);
+    p[3] += lo; c = (p[3] < lo) ? 1ULL : 0;
+    p[4] += hi + c; c = (p[4] < hi + c) ? 1ULL : 0;
+    p[5] = c;
+    
+    mul64(a.d1, b.d2, hi, lo);
+    p[3] += lo; c = (p[3] < lo) ? 1ULL : 0;
+    p[4] += hi + c; c = (p[4] < hi + c) ? 1ULL : 0;
+    p[5] += c;
+    
+    mul64(a.d2, b.d1, hi, lo);
+    p[3] += lo; c = (p[3] < lo) ? 1ULL : 0;
+    p[4] += hi + c; c = (p[4] < hi + c) ? 1ULL : 0;
+    p[5] += c;
+    
+    mul64(a.d3, b.d0, hi, lo);
+    p[3] += lo; c = (p[3] < lo) ? 1ULL : 0;
+    p[4] += hi + c; c = (p[4] < hi + c) ? 1ULL : 0;
+    p[5] += c;
+    
+    // Column 4
+    mul64(a.d1, b.d3, hi, lo);
+    p[4] += lo; c = (p[4] < lo) ? 1ULL : 0;
+    p[5] += hi + c; c = (p[5] < hi + c) ? 1ULL : 0;
+    p[6] = c;
+    
+    mul64(a.d2, b.d2, hi, lo);
+    p[4] += lo; c = (p[4] < lo) ? 1ULL : 0;
+    p[5] += hi + c; c = (p[5] < hi + c) ? 1ULL : 0;
+    p[6] += c;
+    
+    mul64(a.d3, b.d1, hi, lo);
+    p[4] += lo; c = (p[4] < lo) ? 1ULL : 0;
+    p[5] += hi + c; c = (p[5] < hi + c) ? 1ULL : 0;
+    p[6] += c;
+    
+    // Column 5
+    mul64(a.d2, b.d3, hi, lo);
+    p[5] += lo; c = (p[5] < lo) ? 1ULL : 0;
+    p[6] += hi + c; c = (p[6] < hi + c) ? 1ULL : 0;
+    p[7] = c;
+    
+    mul64(a.d3, b.d2, hi, lo);
+    p[5] += lo; c = (p[5] < lo) ? 1ULL : 0;
+    p[6] += hi + c; c = (p[6] < hi + c) ? 1ULL : 0;
+    p[7] += c;
+    
+    // Column 6
+    mul64(a.d3, b.d3, hi, lo);
+    p[6] += lo; c = (p[6] < lo) ? 1ULL : 0;
+    p[7] += hi + c;
+    
+    // === REDUCTION ===
+    // Reduce from 512 to 320: t = p[4:7] * REDUCTION_C
+    uint64_t t[5];
+    mul64(p[4], REDUCTION_C, hi, t[0]);
+    t[1] = hi;
+    mul64(p[5], REDUCTION_C, hi, lo);
+    t[1] += lo; c = (t[1] < lo) ? 1ULL : 0;
+    t[2] = hi + c;
+    mul64(p[6], REDUCTION_C, hi, lo);
+    t[2] += lo; c = (t[2] < lo) ? 1ULL : 0;
+    t[3] = hi + c;
+    mul64(p[7], REDUCTION_C, hi, lo);
+    t[3] += lo; c = (t[3] < lo) ? 1ULL : 0;
+    t[4] = hi + c;
+    
+    // Add t to p[0:3]
+    p[0] += t[0]; c = (p[0] < t[0]) ? 1ULL : 0;
+    p[1] += t[1] + c; c = (p[1] < t[1] + c) ? 1ULL : 0;
+    p[2] += t[2] + c; c = (p[2] < t[2] + c) ? 1ULL : 0;
+    p[3] += t[3] + c; c = (p[3] < t[3] + c) ? 1ULL : 0;
+    t[4] += c;
+    
+    // Reduce from 320 to 256: if t[4] > 0, reduce again
+    if (t[4] > 0) {
+        mul64(t[4], REDUCTION_C, hi, lo);
+        p[0] += lo; c = (p[0] < lo) ? 1ULL : 0;
+        p[1] += hi + c; c = (p[1] < hi + c) ? 1ULL : 0;
+        p[2] += c; c = (p[2] < c) ? 1ULL : 0;
+        p[3] += c;
+    }
+    
+    r.d0 = p[0]; r.d1 = p[1]; r.d2 = p[2]; r.d3 = p[3];
+    
+    // Final reduction if >= P
+    if (r.d3 > P3 || (r.d3 == P3 && (r.d2 > P2 || (r.d2 == P2 && (r.d1 > P1 || (r.d1 == P1 && r.d0 >= P0)))))) {
+        U256 P = {P0, P1, P2, P3};
+        modSub(r, r, P);
+    }
+}
+
+// ---------------------------------------------------------------------------------
+// Modular squaring (using symmetry)
+// ---------------------------------------------------------------------------------
+
+inline void modSqr(thread U256& r, thread const U256& a) {
+    uint64_t p[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    uint64_t hi, lo, lo2, c;
+    
+    // Diagonal terms
+    mul64(a.d0, a.d0, hi, p[0]); p[1] = hi;
+    mul64(a.d1, a.d1, hi, lo); p[2] = lo; p[3] = hi;
+    mul64(a.d2, a.d2, hi, lo); p[4] = lo; p[5] = hi;
+    mul64(a.d3, a.d3, hi, lo); p[6] = lo; p[7] = hi;
+    
+    // Off-diagonal (doubled): 2 * a[i] * a[j]
+    
+    // 2 * a0 * a1 -> p1, p2
+    mul64(a.d0, a.d1, hi, lo);
+    lo2 = lo << 1; hi = (hi << 1) | (lo >> 63);
+    p[1] += lo2; c = (p[1] < lo2) ? 1ULL : 0;
+    p[2] += hi + c; c = (p[2] < hi + c) ? 1ULL : 0;
+    p[3] += c;
+    
+    // 2 * a0 * a2 -> p2, p3
+    mul64(a.d0, a.d2, hi, lo);
+    lo2 = lo << 1; hi = (hi << 1) | (lo >> 63);
+    p[2] += lo2; c = (p[2] < lo2) ? 1ULL : 0;
+    p[3] += hi + c; c = (p[3] < hi + c) ? 1ULL : 0;
+    p[4] += c;
+    
+    // 2 * a0 * a3 -> p3, p4
+    mul64(a.d0, a.d3, hi, lo);
+    lo2 = lo << 1; hi = (hi << 1) | (lo >> 63);
+    p[3] += lo2; c = (p[3] < lo2) ? 1ULL : 0;
+    p[4] += hi + c; c = (p[4] < hi + c) ? 1ULL : 0;
+    p[5] += c;
+    
+    // 2 * a1 * a2 -> p3, p4
+    mul64(a.d1, a.d2, hi, lo);
+    lo2 = lo << 1; hi = (hi << 1) | (lo >> 63);
+    p[3] += lo2; c = (p[3] < lo2) ? 1ULL : 0;
+    p[4] += hi + c; c = (p[4] < hi + c) ? 1ULL : 0;
+    p[5] += c;
+    
+    // 2 * a1 * a3 -> p4, p5
+    mul64(a.d1, a.d3, hi, lo);
+    lo2 = lo << 1; hi = (hi << 1) | (lo >> 63);
+    p[4] += lo2; c = (p[4] < lo2) ? 1ULL : 0;
+    p[5] += hi + c; c = (p[5] < hi + c) ? 1ULL : 0;
+    p[6] += c;
+    
+    // 2 * a2 * a3 -> p5, p6
+    mul64(a.d2, a.d3, hi, lo);
+    lo2 = lo << 1; hi = (hi << 1) | (lo >> 63);
+    p[5] += lo2; c = (p[5] < lo2) ? 1ULL : 0;
+    p[6] += hi + c; c = (p[6] < hi + c) ? 1ULL : 0;
+    p[7] += c;
+    
+    // === REDUCTION ===
+    uint64_t t[5];
+    mul64(p[4], REDUCTION_C, hi, t[0]); t[1] = hi;
+    mul64(p[5], REDUCTION_C, hi, lo);
+    t[1] += lo; c = (t[1] < lo) ? 1ULL : 0;
+    t[2] = hi + c;
+    mul64(p[6], REDUCTION_C, hi, lo);
+    t[2] += lo; c = (t[2] < lo) ? 1ULL : 0;
+    t[3] = hi + c;
+    mul64(p[7], REDUCTION_C, hi, lo);
+    t[3] += lo; c = (t[3] < lo) ? 1ULL : 0;
+    t[4] = hi + c;
+    
+    p[0] += t[0]; c = (p[0] < t[0]) ? 1ULL : 0;
+    p[1] += t[1] + c; c = (p[1] < t[1] + c) ? 1ULL : 0;
+    p[2] += t[2] + c; c = (p[2] < t[2] + c) ? 1ULL : 0;
+    p[3] += t[3] + c; c = (p[3] < t[3] + c) ? 1ULL : 0;
+    t[4] += c;
+    
+    if (t[4] > 0) {
+        mul64(t[4], REDUCTION_C, hi, lo);
+        p[0] += lo; c = (p[0] < lo) ? 1ULL : 0;
+        p[1] += hi + c; c = (p[1] < hi + c) ? 1ULL : 0;
+        p[2] += c; c = (p[2] < c) ? 1ULL : 0;
+        p[3] += c;
+    }
+    
+    r.d0 = p[0]; r.d1 = p[1]; r.d2 = p[2]; r.d3 = p[3];
+    
+    if (r.d3 > P3 || (r.d3 == P3 && (r.d2 > P2 || (r.d2 == P2 && (r.d1 > P1 || (r.d1 == P1 && r.d0 >= P0)))))) {
+        U256 P = {P0, P1, P2, P3};
+        modSub(r, r, P);
+    }
+}
+
+// ---------------------------------------------------------------------------------
+// Modular inverse using Fermat's little theorem
 // ---------------------------------------------------------------------------------
 
 inline void modInv(thread U256& r, thread const U256& a) {
@@ -444,10 +413,10 @@ inline void modInvBatch(thread U256* dx, int n) {
 // ---------------------------------------------------------------------------------
 
 inline void addDist(thread uint64_t* r, constant uint64_t* jd, uint32_t jmp) {
-    uint64_t carry;
-    r[0] += jd[jmp * 2];
-    carry = (r[0] < jd[jmp * 2]) ? 1ULL : 0;
-    r[1] += jd[jmp * 2 + 1] + carry;
+    uint64_t lo = jd[jmp * 2];
+    uint64_t hi = jd[jmp * 2 + 1];
+    r[0] += lo;
+    r[1] += hi + ((r[0] < lo) ? 1ULL : 0);
 }
 
 // ---------------------------------------------------------------------------------
@@ -461,7 +430,7 @@ struct DPOutput {
 };
 
 // ---------------------------------------------------------------------------------
-// Main Kangaroo compute kernel - FAST VERSION
+// Main Kangaroo compute kernel
 // ---------------------------------------------------------------------------------
 
 kernel void computeKangaroos(

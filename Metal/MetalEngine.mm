@@ -205,7 +205,7 @@ bool MetalEngine::CreatePipelines() {
         NSError* error = nil;
 
         // Find the Metal library
-        NSString* libraryPath = [[NSBundle mainBundle] pathForResource:@"KangarooKernel" ofType:@"metallib"];
+        NSString* libraryPath = [[NSBundle mainBundle] pathForResource:@"KangarooKernelFixed" ofType:@"metallib"];
         
         id<MTLLibrary> library = nil;
         
@@ -213,27 +213,18 @@ bool MetalEngine::CreatePipelines() {
             library = [mtlDevice newLibraryWithFile:libraryPath error:&error];
         }
         
+        // Try current directory for the precompiled library
         if (!library) {
-            // Try to compile from source - prefer Fast kernel with fully unrolled arithmetic
-            NSString* shaderPath = @"Metal/KangarooKernelFast.metal";
+            libraryPath = @"KangarooKernelFixed.metallib";
+            library = [mtlDevice newLibraryWithFile:libraryPath error:&error];
+        }
+        
+        if (!library) {
+            // Try to compile from source
+            NSString* shaderPath = @"Metal/KangarooKernel.metal";
             NSString* shaderSource = [NSString stringWithContentsOfFile:shaderPath
                                                                encoding:NSUTF8StringEncoding
                                                                   error:&error];
-            
-            if (!shaderSource) {
-                shaderPath = @"./KangarooKernelFast.metal";
-                shaderSource = [NSString stringWithContentsOfFile:shaderPath
-                                                         encoding:NSUTF8StringEncoding
-                                                            error:&error];
-            }
-            
-            // Fallback to original kernel
-            if (!shaderSource) {
-                shaderPath = @"Metal/KangarooKernel.metal";
-                shaderSource = [NSString stringWithContentsOfFile:shaderPath
-                                                               encoding:NSUTF8StringEncoding
-                                                                  error:&error];
-            }
             
             if (!shaderSource) {
                 shaderPath = @"./KangarooKernel.metal";

@@ -582,7 +582,7 @@ struct DPOutput {
 // Main Kangaroo compute kernel - V2 OPTIMIZED
 // ---------------------------------------------------------------------------------
 
-kernel void computeKangaroosV2(
+kernel void computeKangaroos(
     device uint64_t* kangaroos [[buffer(0)]],
     constant uint64_t* jumpDistances [[buffer(1)]],
     constant uint64_t* jumpPointsX [[buffer(2)]],

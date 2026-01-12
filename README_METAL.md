@@ -189,3 +189,8 @@ Range: [------------------------------------]
        jump      jump jump     jump   (random walks)
         ...collision!...              (same point reached)
 ```
+
+```
+./KangarooMetal -t 0 -d 42 -gpu -gpuId 0 -g 32,512 -i puzzle135_work.dat -w puzzle135_work.dat puzzle135.txt
+```
+./KangarooMetal -t 0 -gpu -gpuId 0 -g 32,512 -i puzzle135_work.dat -w puzzle135_work.dat puzzle135.txt
