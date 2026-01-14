@@ -55,9 +55,9 @@ SECP_OBJS = $(patsubst %.cpp,$(OBJDIR)/%.o,$(notdir $(SECP_SRCS)))
 METAL_OBJS = $(patsubst %.mm,$(OBJDIR)/%.o,$(notdir $(METAL_SRCS)))
 
 # Metal shader
-METAL_SHADER = $(METALDIR)/KangarooKernelFixed.metal
-METAL_AIR = $(OBJDIR)/KangarooKernelFixed.air
-METAL_METALLIB = KangarooKernelFixed.metallib
+METAL_SHADER = $(METALDIR)/KangarooKernel.metal
+METAL_AIR = $(OBJDIR)/KangarooKernel.air
+METAL_METALLIB = KangarooKernel.metallib
 
 # Target
 TARGET = KangarooMetal

@@ -8,10 +8,9 @@ Based on [JeanLucPons/Kangaroo](https://github.com/JeanLucPons/Kangaroo) CUDA im
 
 | Device | Threads | Speed |
 |--------|---------|-------|
-| Apple M4 Pro | 32x512 (16384)   | ~ 1912.16 MK/s |
-| Apple M4 Pro | 16x256 (4096)  | ~ 1345.16 MK/s |
-| Apple M4 Pro | 16×128 (2048) | ~760 MK/s |
-| Apple M4 Pro | 8×64 (512) | ~200 MK/s |
+| Apple M4 Pro | 32x512 (16384) | ~4800 MK/s |
+| Apple M4 Pro | 16x256 (4096)  | ~2500 MK/s |
+| Apple M4 Pro | 8×128 (1024)   | ~1200 MK/s |
 
 
 ## Building
@@ -162,35 +161,33 @@ GNU General Public License v3.0
 - Original CUDA implementation: [JeanLucPons/Kangaroo](https://github.com/JeanLucPons/Kangaroo)
 - Metal port: Adapted for Apple Silicon
 
+## How It Works
 
-How it works:
-Initial positions:
+**Pollard's Kangaroo Algorithm** solves the Elliptic Curve Discrete Logarithm Problem (ECDLP) in O(√n) time:
 
-Tame kangaroos: Start at random points within the range (known private keys)
-Wild kangaroos: Start at the target public key (unknown private key we're searching for)
-Random jumps: Each kangaroo jumps by adding one of 32 pre-computed "jump points" to its current position. The jump is chosen based on the current X-coordinate (pseudo-random but deterministic):
-
-The magic: Because jumps are deterministic based on position, if a tame and wild kangaroo ever land on the same point, they will follow the same path from there. This is called a collision.
-
-Distinguished Points (DP): Instead of checking every point for collisions (expensive), kangaroos only report "distinguished points" - positions where the X-coordinate has N leading zero bits. These are stored in a hash table.
-
-Collision detection: When two kangaroos report the same DP, we found a collision. From the distances traveled, we can compute:
-
-Why it's O(√n):
-The "birthday paradox" - with ~√n random samples, there's ~50% chance two kangaroos land on the same point. For a 134-bit range, that's ~2^67 operations instead of 2^134.
+1. **Tame kangaroos** start at random points within the search range (known private keys)
+2. **Wild kangaroos** start at the target public key (unknown private key)
+3. **Random walks** - each kangaroo jumps by adding pre-computed points based on current position
+4. **Collision detection** - when tame and wild land on the same point, we can compute the private key
+5. **Distinguished Points** - only report points with N leading zero bits to reduce storage
 
 ```
 Range: [------------------------------------]
         ^         ^    ^        ^
         |         |    |        |
-      Tame1    Wild1  Tame2   Wild2   (random starting points)
+      Tame1    Wild1  Tame2   Wild2
         |         |    |        |
         v         v    v        v
-       jump      jump jump     jump   (random walks)
-        ...collision!...              (same point reached)
+       jump      jump jump     jump
+        ...collision!...
 ```
 
-```
-./KangarooMetal -t 0 -d 42 -gpu -gpuId 0 -g 32,512 -i puzzle135_work.dat -w puzzle135_work.dat puzzle135.txt
-```
+## Example Usage
+
+```bash
+# Puzzle 135 (recommended settings for M4 Pro)
+./KangarooMetal -t 0 -gpu -gpuId 0 -g 32,512 -w puzzle135_work.dat puzzle135.txt
+
+# Resume from saved work
 ./KangarooMetal -t 0 -gpu -gpuId 0 -g 32,512 -i puzzle135_work.dat -w puzzle135_work.dat puzzle135.txt
+```

@@ -205,7 +205,7 @@ bool MetalEngine::CreatePipelines() {
         NSError* error = nil;
 
         // Find the Metal library
-        NSString* libraryPath = [[NSBundle mainBundle] pathForResource:@"KangarooKernelFixed" ofType:@"metallib"];
+        NSString* libraryPath = [[NSBundle mainBundle] pathForResource:@"KangarooKernel" ofType:@"metallib"];
         
         id<MTLLibrary> library = nil;
         
@@ -215,7 +215,7 @@ bool MetalEngine::CreatePipelines() {
         
         // Try current directory for the precompiled library
         if (!library) {
-            libraryPath = @"KangarooKernelFixed.metallib";
+            libraryPath = @"KangarooKernel.metallib";
             library = [mtlDevice newLibraryWithFile:libraryPath error:&error];
         }
         
@@ -418,6 +418,7 @@ void MetalEngine::SetParams(uint64_t dpMask, Int* distance, Int* px, Int* py) {
 // ---------------------------------------------------------------------------------
 
 void MetalEngine::SetKangaroos(Int* px, Int* py, Int* d) {
+    if (!initialised || !kangarooBuffer) return;
     @autoreleasepool {
         int gSize = KSIZE * GPU_GRP_SIZE;
         int strideSize = nbThreadPerGroup * KSIZE;
@@ -470,6 +471,7 @@ void MetalEngine::SetKangaroos(Int* px, Int* py, Int* d) {
 // ---------------------------------------------------------------------------------
 
 void MetalEngine::GetKangaroos(Int* px, Int* py, Int* d) {
+    if (!initialised || !kangarooBuffer) return;
     @autoreleasepool {
         int gSize = KSIZE * GPU_GRP_SIZE;
         int strideSize = nbThreadPerGroup * KSIZE;
@@ -520,6 +522,7 @@ void MetalEngine::GetKangaroos(Int* px, Int* py, Int* d) {
 // ---------------------------------------------------------------------------------
 
 void MetalEngine::SetKangaroo(uint64_t kIdx, Int* px, Int* py, Int* d) {
+    if (!initialised || !kangarooBuffer) return;
     @autoreleasepool {
         int gSize = KSIZE * GPU_GRP_SIZE;
         int strideSize = nbThreadPerGroup * KSIZE;
@@ -574,6 +577,8 @@ void MetalEngine::SetWildOffset(Int* offset) {
 // ---------------------------------------------------------------------------------
 
 bool MetalEngine::callKernel() {
+    if (!initialised || !computePipeline) return false;
+
     // Check for shutdown signal
     if (g_metalShutdown.load()) {
         return false;
@@ -627,10 +632,6 @@ bool MetalEngine::callKernel() {
         // Commit and wait for completion
         [commandBuffer commit];
         [commandBuffer waitUntilCompleted];
-        
-        // Give WindowServer time to run - 100 microseconds between kernel dispatches
-        // This is critical on Apple Silicon where GPU is shared with display
-        usleep(100);
 
         if (commandBuffer.error) {
             printf("MetalEngine: Kernel execution failed: %s\n",
@@ -711,6 +712,8 @@ bool MetalEngine::callKernelAndWait() {
 // ---------------------------------------------------------------------------------
 
 bool MetalEngine::Launch(std::vector<ITEM>& hashFound, bool spinWait) {
+    if (!initialised || !computePipeline) return false;
+
     @autoreleasepool {
         hashFound.clear();
 
@@ -826,15 +829,14 @@ bool MetalEngine::GetGridSize(int gpuId, int* x, int* y) {
                 return false;
             }
 
-            // For Apple Silicon, use conservative defaults to prevent display freeze
-            // The GPU is shared with WindowServer, so we can't monopolize it
+            // For Apple Silicon M4 Pro - balance performance vs initialization time
             if (*x <= 0) {
-                // Number of threadgroups - reduced for stability
-                *x = 32; // Conservative default to prevent GPU monopolization
+                // Number of threadgroups - 128 for good GPU utilization
+                *x = 128;
             }
             if (*y <= 0) {
-                // Threads per threadgroup
-                *y = std::min((int)device.maxThreadsPerThreadgroup.width, 128);
+                // Threads per threadgroup - 128 for full SIMD utilization
+                *y = 128;
             }
         }
 
