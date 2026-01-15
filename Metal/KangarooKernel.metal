@@ -17,9 +17,9 @@ using namespace metal;
 #define NB_RUN 8
 #define GPU_GRP_SIZE 128
 #ifdef USE_SYMMETRY
-#define KSIZE 11
+#define KSIZE 12   // 4 px + 4 py + 3 dist + 1 (symmetry) = 12
 #else
-#define KSIZE 10
+#define KSIZE 11   // 4 px + 4 py + 3 dist = 11
 #endif
 #define NBBLOCK 5
 
@@ -41,7 +41,7 @@ constant uint64_t MM64 = 0xD838091DD2253531ULL;
 // Output structure
 struct DPOutput {
     uint32_t x[8];       // 256-bit x
-    uint32_t dist[4];    // 128-bit distance
+    uint32_t dist[6];    // 192-bit distance (supports up to 192-bit ranges)
     uint64_t kIdx;       // Kangaroo Index
 };
 
@@ -626,10 +626,11 @@ void ModSub256Thread(thread uint64_t* r, thread uint64_t* a, thread uint64_t* b)
     }
 }
 
-void Add128(thread uint64_t* r, constant uint64_t* a) {
+void Add192(thread uint64_t* r, constant uint64_t* a) {
     uint64_t c = 0;
     r[0] = add_carry_out(r[0], a[0], c);
     r[1] = add_carry_in_out(r[1], a[1], c);
+    r[2] = add_carry_in_out(r[2], a[2], c);
 }
 
 // ----------------------------------------------------------------------------
@@ -654,7 +655,7 @@ kernel void computeKangaroos(
     
     uint64_t px[GPU_GRP_SIZE][4];
     uint64_t py[GPU_GRP_SIZE][4];
-    uint64_t dist[GPU_GRP_SIZE][2];
+    uint64_t dist[GPU_GRP_SIZE][3];  // 192-bit distance
     uint64_t dx[GPU_GRP_SIZE][4];
     uint64_t dy[4], rx[4], ry[4], _s[4], _p[4];
     
@@ -673,6 +674,7 @@ kernel void computeKangaroos(
         
         dist[g][0] = kangaroos[base + 8 * threadsPerGroup.x];
         dist[g][1] = kangaroos[base + 9 * threadsPerGroup.x];
+        dist[g][2] = kangaroos[base + 10 * threadsPerGroup.x];
     }
     
     // Run
@@ -688,7 +690,7 @@ kernel void computeKangaroos(
             uint32_t jmp = (uint32_t)px[g][0] & (NB_JUMP - 1);
             constant uint64_t* jPxPtr = jumpPx + jmp * 4;
             constant uint64_t* jPyPtr = jumpPy + jmp * 4;
-            constant uint64_t* jDPtr = jumpDist + jmp * 2;
+            constant uint64_t* jDPtr = jumpDist + jmp * 3;  // 192-bit = 3 limbs
             
             ModSub256(dy, py[g], jPyPtr);
             _ModMultClean(_s, dy, dx[g]);
@@ -704,7 +706,7 @@ kernel void computeKangaroos(
             Load256(px[g], rx);
             Load256(py[g], ry);
             
-            Add128(dist[g], jDPtr);
+            Add192(dist[g], jDPtr);
             
             if ((px[g][3] & dpMask) == 0) {
                 uint32_t pos = atomic_fetch_add_explicit(foundCount, 1, memory_order_relaxed);
@@ -716,6 +718,7 @@ kernel void computeKangaroos(
                     out->x[4] = x32[4]; out->x[5] = x32[5]; out->x[6] = x32[6]; out->x[7] = x32[7];
                     thread uint32_t* d32 = (thread uint32_t*)dist[g];
                     out->dist[0] = d32[0]; out->dist[1] = d32[1]; out->dist[2] = d32[2]; out->dist[3] = d32[3];
+                    out->dist[4] = d32[4]; out->dist[5] = d32[5];
                     out->kIdx = kIdx;
                 }
             }
@@ -735,5 +738,6 @@ kernel void computeKangaroos(
         kangaroos[base + 7 * threadsPerGroup.x] = py[g][3];
         kangaroos[base + 8 * threadsPerGroup.x] = dist[g][0];
         kangaroos[base + 9 * threadsPerGroup.x] = dist[g][1];
+        kangaroos[base + 10 * threadsPerGroup.x] = dist[g][2];
     }
 }

@@ -300,8 +300,8 @@ bool MetalEngine::CreateBuffers() {
         }
         kangarooBuffer = (__bridge_retained void*)kangBuf;
 
-        // Jump distance buffer
-        id<MTLBuffer> jdBuf = [mtlDevice newBufferWithLength:NB_JUMP * 2 * sizeof(uint64_t) options:options];
+        // Jump distance buffer (192-bit = 3 uint64_t per jump)
+        id<MTLBuffer> jdBuf = [mtlDevice newBufferWithLength:NB_JUMP * 3 * sizeof(uint64_t) options:options];
         if (!jdBuf) {
             printf("MetalEngine: Failed to create jump distance buffer\n");
             return false;
@@ -386,11 +386,12 @@ void MetalEngine::SetParams(uint64_t dpMask, Int* distance, Int* px, Int* py) {
         uint64_t* dpPtr = (uint64_t*)[(__bridge id<MTLBuffer>)dpMaskBuffer contents];
         *dpPtr = dpMask;
 
-        // Copy jump distances
+        // Copy jump distances (192-bit = 3 uint64_t per jump)
         uint64_t* jdPtr = (uint64_t*)[(__bridge id<MTLBuffer>)jumpDistBuffer contents];
         for (int i = 0; i < NB_JUMP; i++) {
-            jdPtr[i * 2 + 0] = distance[i].bits64[0];
-            jdPtr[i * 2 + 1] = distance[i].bits64[1];
+            jdPtr[i * 3 + 0] = distance[i].bits64[0];
+            jdPtr[i * 3 + 1] = distance[i].bits64[1];
+            jdPtr[i * 3 + 2] = distance[i].bits64[2];
         }
 
         // Copy jump point X coordinates
@@ -445,7 +446,7 @@ void MetalEngine::SetKangaroos(Int* px, Int* py, Int* d) {
                     kangPtr[offset + t + 6 * nbThreadPerGroup] = py[idx].bits64[2];
                     kangPtr[offset + t + 7 * nbThreadPerGroup] = py[idx].bits64[3];
 
-                    // Distance
+                    // Distance (192-bit = 3 limbs)
                     Int dOff;
                     dOff.Set(&d[idx]);
                     if (idx % 2 == WILD) {
@@ -453,10 +454,11 @@ void MetalEngine::SetKangaroos(Int* px, Int* py, Int* d) {
                     }
                     kangPtr[offset + t + 8 * nbThreadPerGroup] = dOff.bits64[0];
                     kangPtr[offset + t + 9 * nbThreadPerGroup] = dOff.bits64[1];
+                    kangPtr[offset + t + 10 * nbThreadPerGroup] = dOff.bits64[2];
 
 #ifdef USE_SYMMETRY
                     // Last jump
-                    kangPtr[offset + t + 10 * nbThreadPerGroup] = (uint64_t)NB_JUMP;
+                    kangPtr[offset + t + 11 * nbThreadPerGroup] = (uint64_t)NB_JUMP;
 #endif
 
                     idx++;
@@ -500,11 +502,12 @@ void MetalEngine::GetKangaroos(Int* px, Int* py, Int* d) {
                     py[idx].bits64[3] = kangPtr[offset + t + 7 * nbThreadPerGroup];
                     py[idx].bits64[4] = 0;
 
-                    // Distance
+                    // Distance (192-bit = 3 limbs)
                     Int dOff;
                     dOff.SetInt32(0);
                     dOff.bits64[0] = kangPtr[offset + t + 8 * nbThreadPerGroup];
                     dOff.bits64[1] = kangPtr[offset + t + 9 * nbThreadPerGroup];
+                    dOff.bits64[2] = kangPtr[offset + t + 10 * nbThreadPerGroup];
                     if (idx % 2 == WILD) {
                         dOff.ModSubK1order(&wildOffset);
                     }
@@ -547,7 +550,7 @@ void MetalEngine::SetKangaroo(uint64_t kIdx, Int* px, Int* py, Int* d) {
         kangPtr[offset + t + 6 * nbThreadPerGroup] = py->bits64[2];
         kangPtr[offset + t + 7 * nbThreadPerGroup] = py->bits64[3];
 
-        // D
+        // D (192-bit = 3 limbs)
         Int dOff;
         dOff.Set(d);
         if (kIdx % 2 == WILD) {
@@ -555,9 +558,10 @@ void MetalEngine::SetKangaroo(uint64_t kIdx, Int* px, Int* py, Int* d) {
         }
         kangPtr[offset + t + 8 * nbThreadPerGroup] = dOff.bits64[0];
         kangPtr[offset + t + 9 * nbThreadPerGroup] = dOff.bits64[1];
+        kangPtr[offset + t + 10 * nbThreadPerGroup] = dOff.bits64[2];
 
 #ifdef USE_SYMMETRY
-        kangPtr[offset + t + 10 * nbThreadPerGroup] = (uint64_t)NB_JUMP;
+        kangPtr[offset + t + 11 * nbThreadPerGroup] = (uint64_t)NB_JUMP;
 #endif
     }
 }
@@ -747,9 +751,10 @@ bool MetalEngine::Launch(std::vector<ITEM>& hashFound, bool spinWait) {
             it.x.bits64[3] = ((uint64_t)outputs[i].x[7] << 32) | outputs[i].x[6];
             it.x.bits64[4] = 0;
 
+            // 192-bit distance
             it.d.bits64[0] = ((uint64_t)outputs[i].dist[1] << 32) | outputs[i].dist[0];
             it.d.bits64[1] = ((uint64_t)outputs[i].dist[3] << 32) | outputs[i].dist[2];
-            it.d.bits64[2] = 0;
+            it.d.bits64[2] = ((uint64_t)outputs[i].dist[5] << 32) | outputs[i].dist[4];
             it.d.bits64[3] = 0;
             it.d.bits64[4] = 0;
 

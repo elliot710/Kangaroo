@@ -19,9 +19,9 @@
 #ifdef __APPLE__
 
 #ifdef USE_SYMMETRY
-#define KSIZE 11
+#define KSIZE 12   // 4 px + 4 py + 3 dist + 1 (symmetry) = 12
 #else
-#define KSIZE 10
+#define KSIZE 11   // 4 px + 4 py + 3 dist = 11
 #endif
 
 #define ITEM_SIZE   56
@@ -37,7 +37,7 @@ struct ITEM {
 // Distinguished point output structure (matches Metal shader)
 struct DPOutput {
     uint32_t x[8];       // Point X (256-bit)
-    uint32_t dist[4];    // Distance (128-bit)
+    uint32_t dist[6];    // Distance (192-bit) - supports up to 192-bit ranges
     uint64_t kIdx;       // Kangaroo index
 };
 
