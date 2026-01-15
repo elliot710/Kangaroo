@@ -1,760 +1,739 @@
 /*
- * Metal Shader for Pollard's Kangaroo Algorithm
- * Based on JeanLucPons/Kangaroo CUDA implementation
- * 
- * Copyright (c) 2024
- * Licensed under GNU General Public License v3.0
+ * Metal Kernel Implementation for Pollard's Kangaroo Algorithm
+ * Strictly following Metal Shading Language Specification Version 3.0+
  *
- * Optimized for Apple Silicon (M1/M2/M3) GPUs
+ * Optimized for Apple Silicon (M-series)
  */
 
 #include <metal_stdlib>
 using namespace metal;
 
-// ---------------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// Constants & Configuration
+// ----------------------------------------------------------------------------
 
+// These must match Constants.h!
 #define NB_JUMP 32
+#define NB_RUN 8
 #define GPU_GRP_SIZE 128
-#define NB_RUN 8  // Work iterations per kernel dispatch
-// #define USE_SYMMETRY  // Disabled - causes GPU timeout on Apple Silicon
-
 #ifdef USE_SYMMETRY
 #define KSIZE 11
 #else
 #define KSIZE 10
 #endif
+#define NBBLOCK 5
 
-#define ITEM_SIZE 56
-#define ITEM_SIZE32 (ITEM_SIZE / 4)
+// 64-bit unsigned integer type
+typedef ulong uint64_t;
+typedef long  int64_t;
+typedef uint  uint32_t;
+typedef int   int32_t;
 
-// SECP256K1 field prime: p = 2^256 - 2^32 - 977
-// p = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
-constant uint64_t P0 = 0xFFFFFFFEFFFFFC2FULL;
-constant uint64_t P1 = 0xFFFFFFFFFFFFFFFFULL;
-constant uint64_t P2 = 0xFFFFFFFFFFFFFFFFULL;
-constant uint64_t P3 = 0xFFFFFFFFFFFFFFFFULL;
+// P = 2^256 - 2^32 - 977
+constant uint64_t P_0 = 0xFFFFFFFEFFFFFC2FULL;
+constant uint64_t P_1 = 0xFFFFFFFFFFFFFFFFULL;
+constant uint64_t P_2 = 0xFFFFFFFFFFFFFFFFULL;
+constant uint64_t P_3 = 0xFFFFFFFFFFFFFFFFULL;
 
-// Order constant for symmetry mode
-constant uint64_t ORDER0 = 0xBFD25E8CD0364141ULL;
-constant uint64_t ORDER1 = 0xBAAEDCE6AF48A03BULL;
-constant uint64_t ORDER2 = 0xFFFFFFFFFFFFFFFEULL;
-constant uint64_t ORDER3 = 0xFFFFFFFFFFFFFFFFULL;
-
-// 64-bit LSB negative inverse of P (mod 2^64)
+// MM64: -1/P mod 2^64
 constant uint64_t MM64 = 0xD838091DD2253531ULL;
-constant uint64_t MSK62 = 0x3FFFFFFFFFFFFFFFULL;
 
-// ---------------------------------------------------------------------------------
-// 256-bit integer type for SECP256K1 operations
-// ---------------------------------------------------------------------------------
-
-struct uint256_t {
-    uint64_t d[4];
-    
-    uint256_t() {
-        d[0] = d[1] = d[2] = d[3] = 0;
-    }
-    
-    uint256_t(uint64_t v0, uint64_t v1, uint64_t v2, uint64_t v3) {
-        d[0] = v0; d[1] = v1; d[2] = v2; d[3] = v3;
-    }
-};
-
-// Extended 320-bit type for modular inversion
-struct uint320_t {
-    uint64_t d[5];
-};
-
-// ---------------------------------------------------------------------------------
-// Kangaroo data structure
-// ---------------------------------------------------------------------------------
-
-struct Kangaroo {
-    uint256_t px;        // Point X coordinate
-    uint256_t py;        // Point Y coordinate
-    uint64_t dist[2];    // Distance (128-bit)
-#ifdef USE_SYMMETRY
-    uint64_t lastJump;   // Last jump for symmetry
-#endif
-};
-
-// ---------------------------------------------------------------------------------
-// Output structure for distinguished points
-// ---------------------------------------------------------------------------------
-
+// Output structure
 struct DPOutput {
-    uint32_t x[8];       // Point X (256-bit)
-    uint32_t dist[4];    // Distance (128-bit)
-    uint64_t kIdx;       // Kangaroo index
+    uint32_t x[8];       // 256-bit x
+    uint32_t dist[4];    // 128-bit distance
+    uint64_t kIdx;       // Kangaroo Index
 };
 
-// ---------------------------------------------------------------------------------
-// Arithmetic helper functions with carry propagation
-// ---------------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// Math Helpers (Inline)
+// ----------------------------------------------------------------------------
 
-// Add with carry
-inline uint64_t addcc(uint64_t a, uint64_t b, thread bool& carry) {
-    uint64_t result = a + b;
-    carry = result < a;
-    return result;
+// Unsigned 64-bit addition with carry in/out
+[[gnu::always_inline]] inline uint64_t add_carry_out(uint64_t a, uint64_t b, thread uint64_t &carry) {
+    uint64_t res = a + b;
+    carry = (res < a) ? 1 : 0;
+    return res;
 }
 
-inline uint64_t addc(uint64_t a, uint64_t b, thread bool& carry) {
-    uint64_t result = a + b + (carry ? 1ULL : 0ULL);
-    carry = (result < a) || (carry && result == a);
-    return result;
+[[gnu::always_inline]] inline uint64_t add_carry_in_out(uint64_t a, uint64_t b, thread uint64_t &carry) {
+    uint64_t sum = a + b;
+    uint64_t c1 = (sum < a) ? 1 : 0;
+    uint64_t res = sum + carry;
+    uint64_t c2 = (res < sum) ? 1 : 0;
+    carry = c1 + c2;  // At most 1 since c1 and c2 can't both be 1
+    return res;
 }
 
-// Subtract with borrow
-inline uint64_t subcc(uint64_t a, uint64_t b, thread bool& borrow) {
-    borrow = a < b;
-    return a - b;
+// Unsigned 64-bit subtraction with borrow in/out
+[[gnu::always_inline]] inline uint64_t sub_borrow_out(uint64_t a, uint64_t b, thread uint64_t &borrow) {
+    uint64_t res = a - b;
+    borrow = (a < b) ? 1 : 0;
+    return res;
 }
 
-inline uint64_t subc(uint64_t a, uint64_t b, thread bool& borrow) {
-    uint64_t c = borrow ? 1ULL : 0ULL;
-    borrow = (a < b) || (a == b && borrow);
-    return a - b - c;
-}
-
-// 64x64 -> 128 multiplication
-inline void mul64(uint64_t a, uint64_t b, thread uint64_t& hi, thread uint64_t& lo) {
-    uint64_t al = a & 0xFFFFFFFFULL;
-    uint64_t ah = a >> 32;
-    uint64_t bl = b & 0xFFFFFFFFULL;
-    uint64_t bh = b >> 32;
+[[gnu::always_inline]] inline uint64_t sub_borrow_in_out(uint64_t a, uint64_t b, thread uint64_t &borrow) {
+    uint64_t diff = a - b;
+    uint64_t b1 = (a < b) ? 1 : 0;
+    uint64_t res = diff - borrow;
+    uint64_t b2 = (diff < borrow) ? 1 : 0; // if diff < borrow means we wrapped
     
-    uint64_t p0 = al * bl;
-    uint64_t p1 = al * bh;
-    uint64_t p2 = ah * bl;
-    uint64_t p3 = ah * bh;
-    
-    uint64_t mid = p1 + p2;
-    bool carry = mid < p1;
-    
-    uint64_t mid_lo = mid << 32;
-    uint64_t mid_hi = (mid >> 32) | (carry ? 0x100000000ULL : 0ULL);
-    
-    lo = p0 + mid_lo;
-    hi = p3 + mid_hi + (lo < p0 ? 1ULL : 0ULL);
+    borrow = b1 + b2;  // At most 1 since b1 and b2 can't both be 1
+    return res;
 }
 
-// ---------------------------------------------------------------------------------
-// 256-bit modular arithmetic for SECP256K1
-// ---------------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// 256-bit Arithmetic
+// ----------------------------------------------------------------------------
 
-// Load 256-bit value
-inline void load256(thread uint256_t& r, thread const uint256_t& a) {
-    r.d[0] = a.d[0];
-    r.d[1] = a.d[1];
-    r.d[2] = a.d[2];
-    r.d[3] = a.d[3];
+// Add P to r (r += P)
+[[gnu::always_inline]] inline void AddP(thread uint64_t* r) {
+    uint64_t c = 0;
+    r[0] = add_carry_out(r[0], P_0, c);
+    r[1] = add_carry_in_out(r[1], P_1, c);
+    r[2] = add_carry_in_out(r[2], P_2, c);
+    r[3] = add_carry_in_out(r[3], P_3, c);
+    r[4] = r[4] + c; // no carry check needed for top limb usually
 }
 
-// Check if 256-bit value is zero
-inline bool isZero256(thread const uint256_t& a) {
-    return (a.d[0] | a.d[1] | a.d[2] | a.d[3]) == 0ULL;
+// Subtract P from r (r -= P)
+[[gnu::always_inline]] inline void SubP(thread uint64_t* r) {
+    uint64_t c = 0;
+    r[0] = sub_borrow_out(r[0], P_0, c);
+    r[1] = sub_borrow_in_out(r[1], P_1, c);
+    r[2] = sub_borrow_in_out(r[2], P_2, c);
+    r[3] = sub_borrow_in_out(r[3], P_3, c);
+    r[4] = r[4] - c;
 }
 
-// Compare two 256-bit values (returns -1, 0, 1)
-inline int cmp256(thread const uint256_t& a, thread const uint256_t& b) {
-    for (int i = 3; i >= 0; i--) {
-        if (a.d[i] > b.d[i]) return 1;
-        if (a.d[i] < b.d[i]) return -1;
+// Copy from constant to thread
+[[gnu::always_inline]] inline void Load(thread uint64_t* r, constant uint64_t* a) {
+    r[0] = a[0]; r[1] = a[1]; r[2] = a[2]; r[3] = a[3]; r[4] = a[4]; 
+}
+
+// Copy 5 elements from 5-element array
+[[gnu::always_inline]] inline void Load5(thread uint64_t* r, thread uint64_t* a) {
+    r[0] = a[0]; r[1] = a[1]; r[2] = a[2]; r[3] = a[3]; r[4] = a[4];
+}
+
+// Copy 4 elements
+[[gnu::always_inline]] inline void Load256(thread uint64_t* r, thread uint64_t* a) {
+    r[0] = a[0]; r[1] = a[1]; r[2] = a[2]; r[3] = a[3];
+}
+
+// Negation (-r)
+[[gnu::always_inline]] inline void Neg(thread uint64_t* r) {
+    uint64_t c = 0;
+    r[0] = sub_borrow_out(0, r[0], c);
+    r[1] = sub_borrow_in_out(0, r[1], c);
+    r[2] = sub_borrow_in_out(0, r[2], c);
+    r[3] = sub_borrow_in_out(0, r[3], c);
+    r[4] = sub_borrow_in_out(0, r[4], c);
+}
+
+// ShiftR62
+[[gnu::always_inline]] inline void ShiftR62(thread uint64_t* r) {
+    r[0] = (r[1] << 2) | (r[0] >> 62);
+    r[1] = (r[2] << 2) | (r[1] >> 62);
+    r[2] = (r[3] << 2) | (r[2] >> 62);
+    r[3] = (r[4] << 2) | (r[3] >> 62);
+    r[4] = (int64_t)(r[4]) >> 62; // Sign extend
+}
+
+[[gnu::always_inline]] inline void ShiftR62_Carry(thread uint64_t* dest, thread uint64_t* r, uint64_t carry) {
+    dest[0] = (r[1] << 2) | (r[0] >> 62);
+    dest[1] = (r[2] << 2) | (r[1] >> 62);
+    dest[2] = (r[3] << 2) | (r[2] >> 62);
+    dest[3] = (r[4] << 2) | (r[3] >> 62);
+    dest[4] = (carry << 2) | (r[4] >> 62);
+}
+
+// Multiply 5-element by scalar (signed)
+[[gnu::always_inline]] inline void IMult(thread uint64_t *r, thread uint64_t *a, int64_t b) {
+    uint64_t t[5];
+    bool negative = (b < 0);
+    uint64_t ub = (uint64_t)(negative ? -b : b);
+    
+    if (negative) {
+        uint64_t c = 0;
+        t[0] = sub_borrow_out(0, a[0], c);
+        t[1] = sub_borrow_in_out(0, a[1], c);
+        t[2] = sub_borrow_in_out(0, a[2], c);
+        t[3] = sub_borrow_in_out(0, a[3], c);
+        t[4] = sub_borrow_in_out(0, a[4], c);
+    } else {
+        Load5(t, a);
     }
-    return 0;
-}
-
-// Add P to 256-bit value (for underflow correction)
-inline void addP256(thread uint256_t& r) {
-    bool carry;
-    r.d[0] = addcc(r.d[0], P0, carry);
-    r.d[1] = addc(r.d[1], P1, carry);
-    r.d[2] = addc(r.d[2], P2, carry);
-    r.d[3] = addc(r.d[3], P3, carry);
-}
-
-// Subtract P from 256-bit value (for overflow correction)
-inline void subP256(thread uint256_t& r) {
-    bool borrow;
-    r.d[0] = subcc(r.d[0], P0, borrow);
-    r.d[1] = subc(r.d[1], P1, borrow);
-    r.d[2] = subc(r.d[2], P2, borrow);
-    r.d[3] = subc(r.d[3], P3, borrow);
-}
-
-// Modular subtraction: r = a - b (mod P)
-inline void modSub256(thread uint256_t& r, thread const uint256_t& a, thread const uint256_t& b) {
-    bool borrow;
-    r.d[0] = subcc(a.d[0], b.d[0], borrow);
-    r.d[1] = subc(a.d[1], b.d[1], borrow);
-    r.d[2] = subc(a.d[2], b.d[2], borrow);
-    r.d[3] = subc(a.d[3], b.d[3], borrow);
     
-    // If borrow, add P back
-    if (borrow) {
-        addP256(r);
+    // r[0]
+    r[0] = t[0] * ub;
+    uint64_t c = mulhi(t[0], ub);
+    
+    // r[1]
+    uint64_t p_lo = t[1] * ub;
+    uint64_t p_hi = mulhi(t[1], ub);
+    uint64_t r1 = p_lo + c;
+    c = p_hi + ((r1 < p_lo) ? 1 : 0);
+    r[1] = r1;
+    
+    // r[2]
+    p_lo = t[2] * ub;
+    p_hi = mulhi(t[2], ub);
+    uint64_t r2 = p_lo + c;
+    c = p_hi + ((r2 < p_lo) ? 1 : 0);
+    r[2] = r2;
+    
+    // r[3]
+    p_lo = t[3] * ub;
+    p_hi = mulhi(t[3], ub);
+    uint64_t r3 = p_lo + c;
+    c = p_hi + ((r3 < p_lo) ? 1 : 0);
+    r[3] = r3;
+    
+    // r[4]
+    p_lo = t[4] * ub;
+    p_hi = mulhi(t[4], ub); 
+    uint64_t r4 = p_lo + c;
+    r[4] = r4;
+}
+
+[[gnu::always_inline]] inline uint64_t IMultC(thread uint64_t* r, thread uint64_t* a, int64_t b) {
+    uint64_t t[5];
+    bool negative = (b < 0);
+    uint64_t ub = (uint64_t)(negative ? -b : b);
+    
+    if (negative) {
+        uint64_t c = 0;
+        t[0] = sub_borrow_out(0, a[0], c);
+        t[1] = sub_borrow_in_out(0, a[1], c);
+        t[2] = sub_borrow_in_out(0, a[2], c);
+        t[3] = sub_borrow_in_out(0, a[3], c);
+        t[4] = sub_borrow_in_out(0, a[4], c);
+    } else {
+        Load5(t, a);
     }
-}
-
-// Modular subtraction in place: r = r - b (mod P)
-inline void modSub256(thread uint256_t& r, thread const uint256_t& b) {
-    bool borrow;
-    r.d[0] = subcc(r.d[0], b.d[0], borrow);
-    r.d[1] = subc(r.d[1], b.d[1], borrow);
-    r.d[2] = subc(r.d[2], b.d[2], borrow);
-    r.d[3] = subc(r.d[3], b.d[3], borrow);
     
-    if (borrow) {
-        addP256(r);
-    }
-}
-
-// Modular negation: r = -a (mod P)
-inline void modNeg256(thread uint256_t& r, thread const uint256_t& a) {
-    bool borrow;
-    uint64_t t0 = subcc(0ULL, a.d[0], borrow);
-    uint64_t t1 = subc(0ULL, a.d[1], borrow);
-    uint64_t t2 = subc(0ULL, a.d[2], borrow);
-    uint64_t t3 = subc(0ULL, a.d[3], borrow);
+    // r = t * ub
+    uint64_t c = mulhi(t[0], ub);
+    r[0] = t[0] * ub;
     
-    bool carry;
-    r.d[0] = addcc(t0, P0, carry);
-    r.d[1] = addc(t1, P1, carry);
-    r.d[2] = addc(t2, P2, carry);
-    r.d[3] = addc(t3, P3, carry);
-}
-
-// Modular negation in place
-inline void modNeg256(thread uint256_t& r) {
-    uint256_t tmp;
-    modNeg256(tmp, r);
-    load256(r, tmp);
-}
-
-// 128-bit addition for distance
-inline void add128(thread uint64_t* r, constant uint64_t* a) {
-    bool carry;
-    r[0] = addcc(r[0], a[0], carry);
-    r[1] = addc(r[1], a[1], carry);
-}
-
-// ---------------------------------------------------------------------------------
-// Modular multiplication for SECP256K1
-// Uses the special form of P for efficient reduction
-// ---------------------------------------------------------------------------------
-
-inline void modMult256(thread uint256_t& r, thread const uint256_t& a, thread const uint256_t& b) {
-    // 512-bit product
-    uint64_t p[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    uint64_t p_lo, p_hi;
     
-    // Schoolbook multiplication
-    for (int i = 0; i < 4; i++) {
-        uint64_t carry = 0;
-        for (int j = 0; j < 4; j++) {
-            uint64_t hi, lo;
-            mul64(a.d[i], b.d[j], hi, lo);
-            
-            // Add to result with carry propagation
-            bool c1, c2;
-            p[i + j] = addcc(p[i + j], lo, c1);
-            p[i + j + 1] = addc(p[i + j + 1], hi, c2);
-            
-            if (c1) {
-                bool tmpCarry;
-                for (int k = i + j + 1; k < 8 && c1; k++) {
-                    p[k] = addcc(p[k], 1ULL, tmpCarry);
-                    c1 = tmpCarry;
-                }
-            }
+    p_lo = t[1] * ub;
+    p_hi = mulhi(t[1], ub);
+    r[1] = p_lo + c;
+    c = p_hi + ((r[1] < p_lo) ? 1 : 0);
+    
+    p_lo = t[2] * ub;
+    p_hi = mulhi(t[2], ub);
+    r[2] = p_lo + c;
+    c = p_hi + ((r[2] < p_lo) ? 1 : 0);
+    
+    p_lo = t[3] * ub;
+    p_hi = mulhi(t[3], ub);
+    r[3] = p_lo + c;
+    c = p_hi + ((r[3] < p_lo) ? 1 : 0);
+    
+    // For t[4], we need SIGNED multiplication because t[4] is the sign extension
+    // CUDA uses madc.hi.s64 for the final carry computation
+    // t[4] is treated as signed, b is the positive value ub
+    int64_t st4 = (int64_t)t[4];
+    int64_t s_product_hi = mulhi(st4, (int64_t)ub);
+    
+    p_lo = t[4] * ub;  // Low part is same for signed/unsigned
+    r[4] = p_lo + c;
+    // carryOut = signed high part + carry from addition
+    int64_t carry_add = ((r[4] < p_lo) ? 1LL : 0LL);
+    uint64_t carryOut = (uint64_t)(s_product_hi + carry_add);
+    
+    return carryOut;
+}
+
+// MulP
+[[gnu::always_inline]] inline void MulP(thread uint64_t *r, uint64_t a) {
+    // a * P_CONST (0x1000003D1)
+    
+    uint64_t al = a * 0x1000003D1ULL;
+    uint64_t ah = mulhi(a, 0x1000003D1ULL);
+    
+    uint64_t c = 0;
+    r[0] = sub_borrow_out(0, al, c);
+    r[1] = sub_borrow_in_out(0, ah, c);
+    r[2] = sub_borrow_in_out(0, 0, c);
+    r[3] = sub_borrow_in_out(0, 0, c);
+    r[4] = sub_borrow_in_out(a, 0, c);
+}
+
+// DivStep
+[[gnu::always_inline]] inline void _DivStep62(thread uint64_t* u, thread uint64_t* v, 
+                       thread int32_t *pos, 
+                       thread int64_t* uu, thread int64_t* uv, 
+                       thread int64_t* vu, thread int64_t* vv) {
+    *uu = 1; *uv = 0;
+    *vu = 0; *vv = 1;
+    
+    uint32_t bitCount = 62;
+    uint64_t u0 = u[0];
+    uint64_t v0 = v[0];
+    uint64_t uh, vh;
+    
+    // Find active limb
+    while(*pos > 0 && (u[*pos] | v[*pos]) == 0) (*pos)--;
+    
+    if (*pos == 0) {
+        uh = u[0];
+        vh = v[0];
+    } else {
+        uint32_t s = clz(u[*pos] | v[*pos]);
+        if (s == 0) {
+            uh = u[*pos];
+            vh = v[*pos];
+        } else {
+            uh = (u[*pos] << s) | (u[*pos - 1] >> (64 - s));
+            vh = (v[*pos] << s) | (v[*pos - 1] >> (64 - s));
         }
     }
     
-    // Reduction using P = 2^256 - 2^32 - 977
-    // c = 0x1000003D1 = 2^32 + 977
-    const uint64_t c = 0x1000003D1ULL;
-    
-    // First reduction: p[0:3] += p[4:7] * c
-    uint64_t t[5] = {0, 0, 0, 0, 0};
-    for (int i = 0; i < 4; i++) {
-        uint64_t hi, lo;
-        mul64(p[4 + i], c, hi, lo);
+    for (int i=0; i<62; i++) { // Max 62 steps
+        uint32_t zeros = ctz(v0 | (1ULL << bitCount));
+        if (zeros > bitCount) zeros = bitCount; // clamp
         
-        bool carry;
-        t[i] = addcc(t[i], lo, carry);
-        t[i + 1] = addc(t[i + 1], hi, carry);
-    }
-    
-    bool carry;
-    p[0] = addcc(p[0], t[0], carry);
-    p[1] = addc(p[1], t[1], carry);
-    p[2] = addc(p[2], t[2], carry);
-    p[3] = addc(p[3], t[3], carry);
-    uint64_t overflow = t[4] + (carry ? 1ULL : 0ULL);
-    
-    // Second reduction for overflow
-    if (overflow > 0) {
-        uint64_t hi, lo;
-        mul64(overflow, c, hi, lo);
+        v0 >>= zeros;
+        vh >>= zeros;
+        *uu <<= zeros;
+        *uv <<= zeros;
+        bitCount -= zeros;
         
-        p[0] = addcc(p[0], lo, carry);
-        p[1] = addc(p[1], hi, carry);
-        p[2] = addc(p[2], 0ULL, carry);
-        p[3] = addc(p[3], 0ULL, carry);
-    }
-    
-    r.d[0] = p[0];
-    r.d[1] = p[1];
-    r.d[2] = p[2];
-    r.d[3] = p[3];
-    
-    // Final reduction if >= P
-    uint256_t P = {P0, P1, P2, P3};
-    if (cmp256(r, P) >= 0) {
-        subP256(r);
-    }
-}
-
-// Modular multiplication in place: r = r * a (mod P)
-inline void modMult256(thread uint256_t& r, thread const uint256_t& a) {
-    uint256_t tmp;
-    load256(tmp, r);
-    modMult256(r, tmp, a);
-}
-
-// Modular squaring
-inline void modSqr256(thread uint256_t& r, thread const uint256_t& a) {
-    // Optimized squaring with Karatsuba-like approach
-    uint64_t p[8] = {0, 0, 0, 0, 0, 0, 0, 0};
-    
-    // Diagonal terms
-    for (int i = 0; i < 4; i++) {
-        uint64_t hi, lo;
-        mul64(a.d[i], a.d[i], hi, lo);
+        if (bitCount == 0) break;
         
-        bool carry;
-        p[2*i] = addcc(p[2*i], lo, carry);
-        p[2*i + 1] = addc(p[2*i + 1], hi, carry);
-    }
-    
-    // Off-diagonal terms (doubled)
-    for (int i = 0; i < 4; i++) {
-        for (int j = i + 1; j < 4; j++) {
-            uint64_t hi, lo;
-            mul64(a.d[i], a.d[j], hi, lo);
-            
-            // Double the product
-            uint64_t carry_bit = hi >> 63;
-            hi = (hi << 1) | (lo >> 63);
-            lo <<= 1;
-            
-            bool carry;
-            p[i + j] = addcc(p[i + j], lo, carry);
-            p[i + j + 1] = addc(p[i + j + 1], hi, carry);
-            if (carry_bit || carry) {
-                for (int k = i + j + 2; k < 8; k++) {
-                    bool tmpCarry;
-                    p[k] = addcc(p[k], carry_bit || carry ? 1ULL : 0ULL, tmpCarry);
-                    if (!tmpCarry) break;
-                }
-            }
+        if (vh < uh) {
+            uint64_t tmp64 = uh; uh = vh; vh = tmp64;
+            tmp64 = u0; u0 = v0; v0 = tmp64;
+            int64_t tmpi64 = *uu; *uu = *vu; *vu = tmpi64;
+            tmpi64 = *uv; *uv = *vv; *vv = tmpi64;
         }
-    }
-    
-    // Reduction using P = 2^256 - 2^32 - 977
-    const uint64_t c = 0x1000003D1ULL;
-    
-    uint64_t t[5] = {0, 0, 0, 0, 0};
-    for (int i = 0; i < 4; i++) {
-        uint64_t hi, lo;
-        mul64(p[4 + i], c, hi, lo);
         
-        bool carry;
-        t[i] = addcc(t[i], lo, carry);
-        t[i + 1] = addc(t[i + 1], hi, carry);
+        vh -= uh;
+        v0 -= u0;
+        *vv -= *uv;
+        *vu -= *uu;
     }
+}
+
+// Matrix operations
+[[gnu::always_inline]] inline void MatrixVecMul(thread uint64_t* u, thread uint64_t* v, int64_t _11, int64_t _12, int64_t _21, int64_t _22) {
+    uint64_t t1[5], t2[5], t3[5], t4[5];
+    IMult(t1, u, _11);
+    IMult(t2, v, _12);
+    IMult(t3, u, _21);
+    IMult(t4, v, _22);
     
-    bool carry;
-    p[0] = addcc(p[0], t[0], carry);
-    p[1] = addc(p[1], t[1], carry);
-    p[2] = addc(p[2], t[2], carry);
-    p[3] = addc(p[3], t[3], carry);
-    uint64_t overflow = t[4] + (carry ? 1ULL : 0ULL);
+    uint64_t c = 0;
+    u[0] = add_carry_out(t1[0], t2[0], c);
+    u[1] = add_carry_in_out(t1[1], t2[1], c);
+    u[2] = add_carry_in_out(t1[2], t2[2], c);
+    u[3] = add_carry_in_out(t1[3], t2[3], c);
+    u[4] = add_carry_in_out(t1[4], t2[4], c);
     
-    if (overflow > 0) {
-        uint64_t hi, lo;
-        mul64(overflow, c, hi, lo);
+    c = 0;
+    v[0] = add_carry_out(t3[0], t4[0], c);
+    v[1] = add_carry_in_out(t3[1], t4[1], c);
+    v[2] = add_carry_in_out(t3[2], t4[2], c);
+    v[3] = add_carry_in_out(t3[3], t4[3], c);
+    v[4] = add_carry_in_out(t3[4], t4[4], c);
+}
+
+[[gnu::always_inline]] inline void MatrixVecMulHalf(thread uint64_t* dest, thread uint64_t* u, thread uint64_t* v, int64_t _11, int64_t _12, thread uint64_t &carry) {
+    uint64_t t1[5], t2[5];
+    uint64_t c1 = IMultC(t1, u, _11);
+    uint64_t c2 = IMultC(t2, v, _12);
+    
+    uint64_t c = 0;
+    dest[0] = add_carry_out(t1[0], t2[0], c);
+    dest[1] = add_carry_in_out(t1[1], t2[1], c);
+    dest[2] = add_carry_in_out(t1[2], t2[2], c);
+    dest[3] = add_carry_in_out(t1[3], t2[3], c);
+    dest[4] = add_carry_in_out(t1[4], t2[4], c);
+    
+    carry = c1 + c2 + c;
+}
+
+[[gnu::always_inline]] inline uint64_t AddCh(thread uint64_t* r, thread uint64_t* a, uint64_t carry) {
+    uint64_t c = 0;
+    r[0] = add_carry_out(r[0], a[0], c);
+    r[1] = add_carry_in_out(r[1], a[1], c);
+    r[2] = add_carry_in_out(r[2], a[2], c);
+    r[3] = add_carry_in_out(r[3], a[3], c);
+    r[4] = add_carry_in_out(r[4], a[4], c);
+    return carry + c;
+}
+
+// ----------------------------------------------------------------------------
+// ModInv
+// ----------------------------------------------------------------------------
+
+void _ModInv(thread uint64_t *R) {
+    int64_t uu, uv, vu, vv;
+    uint64_t mr0, ms0;
+    int32_t pos = NBBLOCK - 1;
+    
+    uint64_t u[NBBLOCK];
+    uint64_t v[NBBLOCK];
+    uint64_t r[NBBLOCK];
+    uint64_t s[NBBLOCK];
+    uint64_t tr[NBBLOCK];
+    uint64_t ts[NBBLOCK];
+    uint64_t r0[NBBLOCK];
+    uint64_t s0[NBBLOCK];
+    uint64_t carryR = 0;
+    uint64_t carryS = 0;
+    
+    u[0] = P_0; u[1] = P_1; u[2] = P_2; u[3] = P_3; u[4] = 0;
+    Load5(v, R);
+    
+    r[0] = 0; r[1] = 0; r[2] = 0; r[3] = 0; r[4] = 0;
+    s[0] = 1; s[1] = 0; s[2] = 0; s[3] = 0; s[4] = 0;
+    
+    // Bounded loop for safety inside kernel
+    for(int loop=0; loop<800; loop++) {
+        _DivStep62(u, v, &pos, &uu, &uv, &vu, &vv);
         
-        p[0] = addcc(p[0], lo, carry);
-        p[1] = addc(p[1], hi, carry);
-        p[2] = addc(p[2], 0ULL, carry);
-        p[3] = addc(p[3], 0ULL, carry);
+        MatrixVecMul(u, v, uu, uv, vu, vv);
+        
+        if (((int64_t)u[4]) < 0) { Neg(u); uu = -uu; uv = -uv; }
+        if (((int64_t)v[4]) < 0) { Neg(v); vu = -vu; vv = -vv; }
+        
+        ShiftR62(u);
+        ShiftR62(v);
+        
+        // Update r
+        MatrixVecMulHalf(tr, r, s, uu, uv, carryR);
+        mr0 = (tr[0] * MM64) & 0x3FFFFFFFFFFFFFFF;
+        MulP(r0, mr0);
+        carryR = AddCh(tr, r0, carryR);
+        
+        bool vIsZero = (v[0] == 0 && v[1] == 0 && v[2] == 0 && v[3] == 0 && v[4] == 0);
+        
+        if (vIsZero) {
+            ShiftR62_Carry(r, tr, carryR);
+            break;
+        } else {
+            // Update s
+            MatrixVecMulHalf(ts, r, s, vu, vv, carryS);
+            ms0 = (ts[0] * MM64) & 0x3FFFFFFFFFFFFFFF;
+            MulP(s0, ms0);
+            carryS = AddCh(ts, s0, carryS);
+        }
+        
+        ShiftR62_Carry(r, tr, carryR);
+        ShiftR62_Carry(s, ts, carryS);
     }
     
-    r.d[0] = p[0];
-    r.d[1] = p[1];
-    r.d[2] = p[2];
-    r.d[3] = p[3];
+    bool uIsOne = (u[0] == 1 && u[1] == 0 && u[2] == 0 && u[3] == 0 && u[4] == 0);
     
-    uint256_t P = {P0, P1, P2, P3};
-    if (cmp256(r, P) >= 0) {
-        subP256(r);
+    if (!uIsOne) {
+        R[0] = 0; R[1] = 0; R[2] = 0; R[3] = 0; R[4] = 0;
+        return;
+    }
+    
+    // Bounded normalization to prevent hangs
+    // Need more iterations because r can be quite far from [0, P)
+    for(int i=0; i<1000 && ((int64_t)r[4]) < 0; i++) AddP(r);
+    for(int i=0; i<1000 && !(((int64_t)r[4]) < 0); i++) SubP(r);
+    AddP(r);
+    
+    Load5(R, r);
+}
+
+// ----------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// Modulus Arithmetic Handlers
+// ----------------------------------------------------------------------------
+
+// Multiplies a 4-limb integer 'a' by a 64-bit scalar 'b', producing a 5-limb result 'r'
+[[gnu::always_inline]] inline void UMult4(thread uint64_t* r, thread uint64_t* a, uint64_t b) {
+    uint64_t carry = 0;
+    uint64_t p, h;
+
+    p = a[0] * b;
+    h = mulhi(a[0], b);
+    r[0] = p;
+    carry = h;
+
+    p = a[1] * b;
+    h = mulhi(a[1], b);
+    r[1] = p + carry;
+    carry = h + ((r[1] < p) ? 1 : 0);
+
+    p = a[2] * b;
+    h = mulhi(a[2], b);
+    r[2] = p + carry;
+    carry = h + ((r[2] < p) ? 1 : 0);
+
+    p = a[3] * b;
+    h = mulhi(a[3], b);
+    r[3] = p + carry;
+    carry = h + ((r[3] < p) ? 1 : 0);
+
+    // a[4] is NOT accessed because 'a' is treated as a 256-bit (4-limb) number
+    // The carry is the 5th limb
+    r[4] = carry;
+}
+
+void _ModMultClean(thread uint64_t *r, thread uint64_t *a, thread uint64_t *b) {
+    uint64_t r512[8] = {0};
+    uint64_t t[5];
+    uint64_t c;
+    
+    // Multiply a[0..3] by b[0]
+    UMult4(r512, a, b[0]);
+    
+    // Multiply a[0..3] by b[1]
+    UMult4(t, a, b[1]);
+    c = 0;
+    r512[1] = add_carry_out(r512[1], t[0], c);
+    r512[2] = add_carry_in_out(r512[2], t[1], c);
+    r512[3] = add_carry_in_out(r512[3], t[2], c);
+    r512[4] = add_carry_in_out(r512[4], t[3], c);
+    r512[5] = add_carry_in_out(r512[5], t[4], c);
+    
+    UMult4(t, a, b[2]);
+    c = 0;
+    r512[2] = add_carry_out(r512[2], t[0], c);
+    r512[3] = add_carry_in_out(r512[3], t[1], c);
+    r512[4] = add_carry_in_out(r512[4], t[2], c);
+    r512[5] = add_carry_in_out(r512[5], t[3], c);
+    r512[6] = add_carry_in_out(r512[6], t[4], c);
+    
+    UMult4(t, a, b[3]);
+    c = 0;
+    r512[3] = add_carry_out(r512[3], t[0], c);
+    r512[4] = add_carry_in_out(r512[4], t[1], c);
+    r512[5] = add_carry_in_out(r512[5], t[2], c);
+    r512[6] = add_carry_in_out(r512[6], t[3], c);
+    r512[7] = add_carry_in_out(r512[7], t[4], c);
+    
+    // Reduce
+    // Use UMult4 to multiply r512[4..7] by the constant
+    UMult4(t, (thread uint64_t*)(r512+4), 0x1000003D1ULL);
+    
+    c = 0;
+    r512[0] = add_carry_out(r512[0], t[0], c);
+    r512[1] = add_carry_in_out(r512[1], t[1], c);
+    r512[2] = add_carry_in_out(r512[2], t[2], c);
+    r512[3] = add_carry_in_out(r512[3], t[3], c);
+    
+    // Total overflow beyond 256 bits is the carry 'c' + the high part 't[4]'
+    // We must multiply this overflow by the constant and add again.
+    uint64_t overflow = c + t[4];
+    
+    uint64_t p_lo = overflow * 0x1000003D1ULL;
+    uint64_t p_hi = mulhi(overflow, 0x1000003D1ULL);
+    
+    c = 0;
+    r[0] = add_carry_out(r512[0], p_lo, c);
+    r[1] = add_carry_in_out(r512[1], p_hi, c);
+    r[2] = add_carry_in_out(r512[2], 0, c);
+    r[3] = add_carry_in_out(r512[3], 0, c);
+    
+    // Final check for carry (very rare)
+    if (c) {
+        uint64_t cc = 0;
+        r[0] = add_carry_out(r[0], 0x1000003D1ULL, cc);
+        r[1] = add_carry_in_out(r[1], 0, cc);
+        r[2] = add_carry_in_out(r[2], 0, cc);
+        r[3] = add_carry_in_out(r[3], 0, cc);
+    }
+    
+    // Final reduction: if r >= P, subtract P
+    // Check if r >= P (P = 2^256 - 2^32 - 977)
+    // r >= P iff r[3] > P_3 || (r[3] == P_3 && r[2] > P_2) || ...
+    // Since P_3,P_2,P_1 = 0xFF..FF, we only need to check if r >= P when r[3] == P_3
+    // and that requires r[2] == P_2, r[1] == P_1, and r[0] >= P_0
+    if (r[3] == P_3 && r[2] == P_2 && r[1] == P_1 && r[0] >= P_0) {
+        uint64_t borrow = 0;
+        r[0] = sub_borrow_out(r[0], P_0, borrow);
+        r[1] = sub_borrow_in_out(r[1], P_1, borrow);
+        r[2] = sub_borrow_in_out(r[2], P_2, borrow);
+        r[3] = sub_borrow_in_out(r[3], P_3, borrow);
     }
 }
 
-// ---------------------------------------------------------------------------------
-// Modular inverse using optimized addition chain for secp256k1
-// Uses special structure of p = 2^256 - 2^32 - 977
-// Only ~260 multiplications instead of ~512 with Fermat
-// Based on: https://briansmith.org/ecc-inversion-addition-chains-01
-// ---------------------------------------------------------------------------------
-
-inline void modInv256(thread uint256_t& r) {
-    uint256_t x2, x3, x6, x9, x11, x22, x44, x88, x176, x220, x223;
-    uint256_t t1;
-    
-    // x2 = r^2 * r = r^3... wait, x2 = r^(2^1) * r = r^(2+1) = r^3? No.
-    // x2 = r^2
-    modSqr256(x2, r);
-    // x2 = r^2 * r = r^3
-    modMult256(x2, r);
-    
-    // x3 = x2^2 * r = r^(3*2+1) = r^7
-    modSqr256(x3, x2);
-    modMult256(x3, r);
-    
-    // x6 = x3^(2^3) * x3 = r^(7*8 + 7) = r^63
-    modSqr256(x6, x3);
-    modSqr256(x6, x6);
-    modSqr256(x6, x6);
-    modMult256(x6, x3);
-    
-    // x9 = x6^(2^3) * x3 = r^(63*8 + 7) = r^511
-    modSqr256(x9, x6);
-    modSqr256(x9, x9);
-    modSqr256(x9, x9);
-    modMult256(x9, x3);
-    
-    // x11 = x9^(2^2) * x2 = r^(511*4 + 3) = r^2047
-    modSqr256(x11, x9);
-    modSqr256(x11, x11);
-    modMult256(x11, x2);
-    
-    // x22 = x11^(2^11) * x11
-    load256(x22, x11);
-    for (int i = 0; i < 11; i++) modSqr256(x22, x22);
-    modMult256(x22, x11);
-    
-    // x44 = x22^(2^22) * x22
-    load256(x44, x22);
-    for (int i = 0; i < 22; i++) modSqr256(x44, x44);
-    modMult256(x44, x22);
-    
-    // x88 = x44^(2^44) * x44
-    load256(x88, x44);
-    for (int i = 0; i < 44; i++) modSqr256(x88, x88);
-    modMult256(x88, x44);
-    
-    // x176 = x88^(2^88) * x88
-    load256(x176, x88);
-    for (int i = 0; i < 88; i++) modSqr256(x176, x176);
-    modMult256(x176, x88);
-    
-    // x220 = x176^(2^44) * x44
-    load256(x220, x176);
-    for (int i = 0; i < 44; i++) modSqr256(x220, x220);
-    modMult256(x220, x44);
-    
-    // x223 = x220^(2^3) * x3
-    modSqr256(x223, x220);
-    modSqr256(x223, x223);
-    modSqr256(x223, x223);
-    modMult256(x223, x3);
-    
-    // Final: t1 = x223^(2^23) * x22
-    load256(t1, x223);
-    for (int i = 0; i < 23; i++) modSqr256(t1, t1);
-    modMult256(t1, x22);
-    
-    // t1 = t1^(2^5) * r
-    for (int i = 0; i < 5; i++) modSqr256(t1, t1);
-    modMult256(t1, r);
-    
-    // t1 = t1^(2^3) * x2
-    for (int i = 0; i < 3; i++) modSqr256(t1, t1);
-    modMult256(t1, x2);
-    
-    // t1 = t1^(2^2) * r
-    modSqr256(t1, t1);
-    modSqr256(t1, t1);
-    modMult256(t1, r);
-    
-    load256(r, t1);
+void _ModSqrClean(thread uint64_t *rp, thread uint64_t *up) {
+    _ModMultClean(rp, up, up);
 }
 
-// ---------------------------------------------------------------------------------
-// Batch modular inverse using Montgomery's trick
-// Much more efficient than individual inversions
-// ---------------------------------------------------------------------------------
+// ----------------------------------------------------------------------------
+// Group Operations
+// ----------------------------------------------------------------------------
 
-inline void modInvGrouped(thread uint256_t* dx, int groupSize) {
-    uint256_t subProducts[GPU_GRP_SIZE];
-    uint256_t inverse;
-    
-    // Compute cumulative products
-    load256(subProducts[0], dx[0]);
-    for (int i = 1; i < groupSize; i++) {
-        modMult256(subProducts[i], subProducts[i - 1], dx[i]);
+void _ModInvGrouped(thread uint64_t r[GPU_GRP_SIZE][4]) {
+    uint64_t subp[GPU_GRP_SIZE][4];
+    uint64_t newValue[4];
+    uint64_t inverse[5];
+
+    Load256(subp[0], r[0]);
+    for(uint32_t i = 1; i < GPU_GRP_SIZE; i++) {
+        _ModMultClean(subp[i], subp[i - 1], r[i]);
+    }
+
+    Load256(inverse, subp[GPU_GRP_SIZE - 1]);
+    inverse[4] = 0;
+    _ModInv(inverse);
+
+    for(uint32_t i = GPU_GRP_SIZE - 1; i > 0; i--) {
+        _ModMultClean(newValue, subp[i - 1], inverse);
+        _ModMultClean(inverse, inverse, r[i]);
+        Load256(r[i], newValue);
     }
     
-    // Invert the final product
-    load256(inverse, subProducts[groupSize - 1]);
-    modInv256(inverse);
+    Load256(r[0], inverse);
+}
+
+// ----------------------------------------------------------------------------
+// KERNEL Helpers
+// ----------------------------------------------------------------------------
+
+void ModSub256(thread uint64_t* r, thread uint64_t* a, constant uint64_t* b) {
+    uint64_t c = 0;
+    r[0] = sub_borrow_out(a[0], b[0], c);
+    r[1] = sub_borrow_in_out(a[1], b[1], c);
+    r[2] = sub_borrow_in_out(a[2], b[2], c);
+    r[3] = sub_borrow_in_out(a[3], b[3], c);
     
-    // Recover individual inverses
-    for (int i = groupSize - 1; i > 0; i--) {
-        uint256_t newValue;
-        modMult256(newValue, subProducts[i - 1], inverse);
-        modMult256(inverse, dx[i]);
-        load256(dx[i], newValue);
+    if (c) {
+        c = 0;
+        r[0] = add_carry_out(r[0], P_0, c);
+        r[1] = add_carry_in_out(r[1], P_1, c);
+        r[2] = add_carry_in_out(r[2], P_2, c);
+        r[3] = add_carry_in_out(r[3], P_3, c);
     }
-    
-    load256(dx[0], inverse);
 }
 
-// ---------------------------------------------------------------------------------
-// Symmetry mode helpers
-// ---------------------------------------------------------------------------------
-
-#ifdef USE_SYMMETRY
-inline bool modPositive256(thread uint256_t& py) {
-    // Check if y > (P-1)/2 (probability ~1/2^192)
-    if (py.d[3] > 0x7FFFFFFFFFFFFFFFULL) {
-        modNeg256(py);
-        return true;
+void ModSub256Thread(thread uint64_t* r, thread uint64_t* a, thread uint64_t* b) {
+    uint64_t c = 0;
+    r[0] = sub_borrow_out(a[0], b[0], c);
+    r[1] = sub_borrow_in_out(a[1], b[1], c);
+    r[2] = sub_borrow_in_out(a[2], b[2], c);
+    r[3] = sub_borrow_in_out(a[3], b[3], c);
+    
+    if (c) {
+        c = 0;
+        r[0] = add_carry_out(r[0], P_0, c);
+        r[1] = add_carry_in_out(r[1], P_1, c);
+        r[2] = add_carry_in_out(r[2], P_2, c);
+        r[3] = add_carry_in_out(r[3], P_3, c);
     }
-    return false;
 }
 
-inline void modNeg256Order(thread uint64_t* dist) {
-    bool borrow;
-    uint64_t t0 = subcc(0ULL, dist[0], borrow);
-    uint64_t t1 = subc(0ULL, dist[1], borrow);
-    
-    bool carry;
-    dist[0] = addcc(t0, ORDER0, carry);
-    dist[1] = addc(t1, ORDER1, carry);
+void Add128(thread uint64_t* r, constant uint64_t* a) {
+    uint64_t c = 0;
+    r[0] = add_carry_out(r[0], a[0], c);
+    r[1] = add_carry_in_out(r[1], a[1], c);
 }
-#endif
 
-// ---------------------------------------------------------------------------------
-// Main Kangaroo compute kernel
-// ---------------------------------------------------------------------------------
-
+// ----------------------------------------------------------------------------
+// Main Kernel
+// ----------------------------------------------------------------------------
 kernel void computeKangaroos(
-    device uint64_t* kangaroos [[buffer(0)]],          // Kangaroo data (px, py, dist)
-    constant uint64_t* jumpDistances [[buffer(1)]],     // Jump distances [NB_JUMP][2]
-    constant uint64_t* jumpPointsX [[buffer(2)]],       // Jump point X coords [NB_JUMP][4]
-    constant uint64_t* jumpPointsY [[buffer(3)]],       // Jump point Y coords [NB_JUMP][4]
-    device atomic_uint* foundCount [[buffer(4)]],       // Number of DPs found
-    device DPOutput* outputs [[buffer(5)]],             // Output DPs
-    constant uint64_t& dpMask [[buffer(6)]],            // DP mask
-    constant uint32_t& maxFound [[buffer(7)]],          // Max outputs
-    uint tid [[thread_index_in_threadgroup]],
-    uint gid [[threadgroup_position_in_grid]],
-    uint threadsPerGroup [[threads_per_threadgroup]]
+    device uint64_t* kangaroos [[buffer(0)]],
+    constant uint64_t* jumpDist [[buffer(1)]],
+    constant uint64_t* jumpPx [[buffer(2)]],
+    constant uint64_t* jumpPy [[buffer(3)]],
+    device atomic_uint* foundCount [[buffer(4)]],
+    device DPOutput* output [[buffer(5)]],
+    constant uint64_t& dpMask [[buffer(6)]],
+    constant uint32_t& maxFound [[buffer(7)]],
+    uint3 tid [[thread_position_in_threadgroup]],
+    uint3 gid [[threadgroup_position_in_grid]],
+    uint3 threadsPerGroup [[threads_per_threadgroup]]
 ) {
-    // Local storage for this thread's kangaroos
-    uint256_t px[GPU_GRP_SIZE];
-    uint256_t py[GPU_GRP_SIZE];
+    uint32_t idx = tid.x;
+    uint32_t strideSize = threadsPerGroup.x * KSIZE;
+    uint32_t blockOffset = gid.x * threadsPerGroup.x * GPU_GRP_SIZE * KSIZE;
+    
+    uint64_t px[GPU_GRP_SIZE][4];
+    uint64_t py[GPU_GRP_SIZE][4];
     uint64_t dist[GPU_GRP_SIZE][2];
-#ifdef USE_SYMMETRY
-    uint64_t lastJump[GPU_GRP_SIZE];
-#endif
+    uint64_t dx[GPU_GRP_SIZE][4];
+    uint64_t dy[4], rx[4], ry[4], _s[4], _p[4];
     
-    uint256_t dx[GPU_GRP_SIZE];
-    uint256_t dy;
-    uint256_t rx, ry;
-    uint256_t s, p;
-    
-    // Calculate base offset for this thread
-    uint32_t xPtr = (gid * threadsPerGroup * GPU_GRP_SIZE) * KSIZE;
-    
-    // Load kangaroos from global memory
-    for (int g = 0; g < GPU_GRP_SIZE; g++) {
-        uint32_t stride = g * KSIZE * threadsPerGroup;
+    // Load
+    for(int g = 0; g < GPU_GRP_SIZE; g++) {
+        uint32_t base = blockOffset + g * strideSize + idx;
+        px[g][0] = kangaroos[base + 0 * threadsPerGroup.x];
+        px[g][1] = kangaroos[base + 1 * threadsPerGroup.x];
+        px[g][2] = kangaroos[base + 2 * threadsPerGroup.x];
+        px[g][3] = kangaroos[base + 3 * threadsPerGroup.x];
         
-        px[g].d[0] = kangaroos[xPtr + tid + 0 * threadsPerGroup + stride];
-        px[g].d[1] = kangaroos[xPtr + tid + 1 * threadsPerGroup + stride];
-        px[g].d[2] = kangaroos[xPtr + tid + 2 * threadsPerGroup + stride];
-        px[g].d[3] = kangaroos[xPtr + tid + 3 * threadsPerGroup + stride];
+        py[g][0] = kangaroos[base + 4 * threadsPerGroup.x];
+        py[g][1] = kangaroos[base + 5 * threadsPerGroup.x];
+        py[g][2] = kangaroos[base + 6 * threadsPerGroup.x];
+        py[g][3] = kangaroos[base + 7 * threadsPerGroup.x];
         
-        py[g].d[0] = kangaroos[xPtr + tid + 4 * threadsPerGroup + stride];
-        py[g].d[1] = kangaroos[xPtr + tid + 5 * threadsPerGroup + stride];
-        py[g].d[2] = kangaroos[xPtr + tid + 6 * threadsPerGroup + stride];
-        py[g].d[3] = kangaroos[xPtr + tid + 7 * threadsPerGroup + stride];
-        
-        dist[g][0] = kangaroos[xPtr + tid + 8 * threadsPerGroup + stride];
-        dist[g][1] = kangaroos[xPtr + tid + 9 * threadsPerGroup + stride];
-        
-#ifdef USE_SYMMETRY
-        lastJump[g] = kangaroos[xPtr + tid + 10 * threadsPerGroup + stride];
-#endif
+        dist[g][0] = kangaroos[base + 8 * threadsPerGroup.x];
+        dist[g][1] = kangaroos[base + 9 * threadsPerGroup.x];
     }
     
-    // Main computation loop
-    for (int run = 0; run < NB_RUN; run++) {
-        // Compute dx = px - jPx[jmp] for all kangaroos
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        
-        for (int g = 0; g < GPU_GRP_SIZE; g++) {
-            uint32_t jmp = (uint32_t)px[g].d[0] & (NB_JUMP - 1);
-            
-#ifdef USE_SYMMETRY
-            if (jmp == lastJump[g]) {
-                jmp = (lastJump[g] + 1) % NB_JUMP;
-            }
-            lastJump[g] = jmp;
-#endif
-            
-            // Load jump point X
-            uint256_t jPx;
-            jPx.d[0] = jumpPointsX[jmp * 4 + 0];
-            jPx.d[1] = jumpPointsX[jmp * 4 + 1];
-            jPx.d[2] = jumpPointsX[jmp * 4 + 2];
-            jPx.d[3] = jumpPointsX[jmp * 4 + 3];
-            
-            modSub256(dx[g], px[g], jPx);
+    // Run
+    for(int run = 0; run < NB_RUN; run++) {
+        for(int g = 0; g < GPU_GRP_SIZE; g++) {
+            uint32_t jmp = (uint32_t)px[g][0] & (NB_JUMP - 1);
+            ModSub256(dx[g], px[g], jumpPx + jmp * 4);
         }
         
-        // Batch modular inverse
-        modInvGrouped(dx, GPU_GRP_SIZE);
+        _ModInvGrouped(dx);
         
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        
-        // Complete point addition for each kangaroo
-        for (int g = 0; g < GPU_GRP_SIZE; g++) {
-#ifdef USE_SYMMETRY
-            uint32_t jmp = lastJump[g];
-#else
-            uint32_t jmp = (uint32_t)px[g].d[0] & (NB_JUMP - 1);
-#endif
+        for(int g = 0; g < GPU_GRP_SIZE; g++) {
+            uint32_t jmp = (uint32_t)px[g][0] & (NB_JUMP - 1);
+            constant uint64_t* jPxPtr = jumpPx + jmp * 4;
+            constant uint64_t* jPyPtr = jumpPy + jmp * 4;
+            constant uint64_t* jDPtr = jumpDist + jmp * 2;
             
-            // Load jump point
-            uint256_t jPx, jPy;
-            jPx.d[0] = jumpPointsX[jmp * 4 + 0];
-            jPx.d[1] = jumpPointsX[jmp * 4 + 1];
-            jPx.d[2] = jumpPointsX[jmp * 4 + 2];
-            jPx.d[3] = jumpPointsX[jmp * 4 + 3];
+            ModSub256(dy, py[g], jPyPtr);
+            _ModMultClean(_s, dy, dx[g]);
+            _ModSqrClean(_p, _s);
             
-            jPy.d[0] = jumpPointsY[jmp * 4 + 0];
-            jPy.d[1] = jumpPointsY[jmp * 4 + 1];
-            jPy.d[2] = jumpPointsY[jmp * 4 + 2];
-            jPy.d[3] = jumpPointsY[jmp * 4 + 3];
+            ModSub256(rx, _p, jPxPtr);
+            ModSub256Thread(rx, rx, px[g]);
             
-            // dy = py - jPy
-            modSub256(dy, py[g], jPy);
+            ModSub256Thread(ry, px[g], rx);
+            _ModMultClean(ry, ry, _s);
+            ModSub256Thread(ry, ry, py[g]);
             
-            // s = dy * dx^(-1)
-            modMult256(s, dy, dx[g]);
+            Load256(px[g], rx);
+            Load256(py[g], ry);
             
-            // p = s^2
-            modSqr256(p, s);
+            Add128(dist[g], jDPtr);
             
-            // rx = p - jPx - px
-            modSub256(rx, p, jPx);
-            modSub256(rx, px[g]);
-            
-            // ry = s * (px - rx) - py
-            modSub256(ry, px[g], rx);
-            modMult256(ry, s);
-            modSub256(ry, py[g]);
-            
-            // Update position
-            load256(px[g], rx);
-            load256(py[g], ry);
-            
-            // Update distance
-            add128(dist[g], &jumpDistances[jmp * 2]);
-            
-#ifdef USE_SYMMETRY
-            if (modPositive256(py[g])) {
-                modNeg256Order(dist[g]);
-            }
-#endif
-            
-            // Check for distinguished point
-            if ((px[g].d[3] & dpMask) == 0) {
+            if ((px[g][3] & dpMask) == 0) {
                 uint32_t pos = atomic_fetch_add_explicit(foundCount, 1, memory_order_relaxed);
-                
                 if (pos < maxFound) {
-                    uint64_t kIdx = (uint64_t)tid + 
-                                   (uint64_t)g * (uint64_t)threadsPerGroup + 
-                                   (uint64_t)gid * ((uint64_t)threadsPerGroup * GPU_GRP_SIZE);
-                    
-                    // Store output
-                    outputs[pos].x[0] = (uint32_t)px[g].d[0];
-                    outputs[pos].x[1] = (uint32_t)(px[g].d[0] >> 32);
-                    outputs[pos].x[2] = (uint32_t)px[g].d[1];
-                    outputs[pos].x[3] = (uint32_t)(px[g].d[1] >> 32);
-                    outputs[pos].x[4] = (uint32_t)px[g].d[2];
-                    outputs[pos].x[5] = (uint32_t)(px[g].d[2] >> 32);
-                    outputs[pos].x[6] = (uint32_t)px[g].d[3];
-                    outputs[pos].x[7] = (uint32_t)(px[g].d[3] >> 32);
-                    
-                    outputs[pos].dist[0] = (uint32_t)dist[g][0];
-                    outputs[pos].dist[1] = (uint32_t)(dist[g][0] >> 32);
-                    outputs[pos].dist[2] = (uint32_t)dist[g][1];
-                    outputs[pos].dist[3] = (uint32_t)(dist[g][1] >> 32);
-                    
-                    outputs[pos].kIdx = kIdx;
+                    uint64_t kIdx = (uint64_t)idx + (uint64_t)g * threadsPerGroup.x + (uint64_t)gid.x * (threadsPerGroup.x * GPU_GRP_SIZE);
+                    device DPOutput* out = output + pos;
+                    thread uint32_t* x32 = (thread uint32_t*)px[g];
+                    out->x[0] = x32[0]; out->x[1] = x32[1]; out->x[2] = x32[2]; out->x[3] = x32[3];
+                    out->x[4] = x32[4]; out->x[5] = x32[5]; out->x[6] = x32[6]; out->x[7] = x32[7];
+                    thread uint32_t* d32 = (thread uint32_t*)dist[g];
+                    out->dist[0] = d32[0]; out->dist[1] = d32[1]; out->dist[2] = d32[2]; out->dist[3] = d32[3];
+                    out->kIdx = kIdx;
                 }
             }
         }
     }
     
-    // Store kangaroos back to global memory
-    for (int g = 0; g < GPU_GRP_SIZE; g++) {
-        uint32_t stride = g * KSIZE * threadsPerGroup;
-        
-        kangaroos[xPtr + tid + 0 * threadsPerGroup + stride] = px[g].d[0];
-        kangaroos[xPtr + tid + 1 * threadsPerGroup + stride] = px[g].d[1];
-        kangaroos[xPtr + tid + 2 * threadsPerGroup + stride] = px[g].d[2];
-        kangaroos[xPtr + tid + 3 * threadsPerGroup + stride] = px[g].d[3];
-        
-        kangaroos[xPtr + tid + 4 * threadsPerGroup + stride] = py[g].d[0];
-        kangaroos[xPtr + tid + 5 * threadsPerGroup + stride] = py[g].d[1];
-        kangaroos[xPtr + tid + 6 * threadsPerGroup + stride] = py[g].d[2];
-        kangaroos[xPtr + tid + 7 * threadsPerGroup + stride] = py[g].d[3];
-        
-        kangaroos[xPtr + tid + 8 * threadsPerGroup + stride] = dist[g][0];
-        kangaroos[xPtr + tid + 9 * threadsPerGroup + stride] = dist[g][1];
-        
-#ifdef USE_SYMMETRY
-        kangaroos[xPtr + tid + 10 * threadsPerGroup + stride] = lastJump[g];
-#endif
-    }
-}
-
-// ---------------------------------------------------------------------------------
-// Utility kernel for initialization
-// ---------------------------------------------------------------------------------
-
-kernel void initializeKangaroos(
-    device uint64_t* kangaroos [[buffer(0)]],
-    constant uint64_t* initData [[buffer(1)]],       // Initial positions
-    constant uint32_t& numKangaroos [[buffer(2)]],
-    uint tid [[thread_index_in_threadgroup]],
-    uint gid [[threadgroup_position_in_grid]],
-    uint threadsPerGroup [[threads_per_threadgroup]]
-) {
-    uint32_t idx = gid * threadsPerGroup + tid;
-    if (idx >= numKangaroos) return;
-    
-    // Copy initial kangaroo data
-    for (int i = 0; i < KSIZE; i++) {
-        kangaroos[idx * KSIZE + i] = initData[idx * KSIZE + i];
+    // Store
+    for(int g = 0; g < GPU_GRP_SIZE; g++) {
+        uint32_t base = blockOffset + g * strideSize + idx;
+        kangaroos[base + 0 * threadsPerGroup.x] = px[g][0];
+        kangaroos[base + 1 * threadsPerGroup.x] = px[g][1];
+        kangaroos[base + 2 * threadsPerGroup.x] = px[g][2];
+        kangaroos[base + 3 * threadsPerGroup.x] = px[g][3];
+        kangaroos[base + 4 * threadsPerGroup.x] = py[g][0];
+        kangaroos[base + 5 * threadsPerGroup.x] = py[g][1];
+        kangaroos[base + 6 * threadsPerGroup.x] = py[g][2];
+        kangaroos[base + 7 * threadsPerGroup.x] = py[g][3];
+        kangaroos[base + 8 * threadsPerGroup.x] = dist[g][0];
+        kangaroos[base + 9 * threadsPerGroup.x] = dist[g][1];
     }
 }

@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+# Check if x coordinates are on secp256k1 curve
+p = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F
+
+xs = [
+    0x00013dd87a87c76c41453026b728a5f1e88bad9971fca3b10cabaa5eac0cf2d5,
+    0x0013e0cbae7f87b09d1423be803f0673e0929ac9210db5882582a91eda9235c2,
+    0x001f4acbc59126650263b1d58a67b312541a0e76544ab4aff16ee53c7a686766,
+    0x0004fe7feb139ae29c057f50f72915735bdc1d3e3587dec79550b62ed1abe8b1,
+    0x000f5e91ada9e71ed416ad0ba51c6705c3ca9b22be0cc50b413b9a7d09caa4a8,
+    0x000b2c966f50f243d0debf844bef1a90335def76a035e405b692072ecb4c01c4,
+    0x00031d1cd0449b97e51abb1ba025928b44b92e4838ff879e00ada0be63519072,
+    0x0016c45a7fe2e09840057365916ea658adfbbe19f7b57833ab5e714e67517292,
+    0x000be31f478bc185f1e4cb3c5214bad3ce55043709ef18b3d5633dae588e4646,
+    0x001e3b9985149254965b2b44b36d1274b3ab78929190f44ffdd3f1fac3c6a88e,
+    0x00196720dd1a358df9b4a11d01d39d81b10f353e0bdf04480c70ba059635ce4e,
+    0x00126f07c1272e3af5c518475aa91548f4e7dc68f0bb86372781e247cd74b187,
+    0x0013181cf66abb44d06f55c1219c70389c5741042ad166dda7665354929b33b8,
+    0x0019e228100269ff0520278ca0065c4bd101ec95682c7d36276116e8f3417be5,
+    0x001e7ad55ed210f58afd9216721b54b84a40745fed7c25e8ce17882bea4e4f27,
+    0x001bced0759d83476ece84b55607d8cea817889e565f8b10cb30636fbcd9d0b6,
+    0x001c6155d35bfc4c97e86ea0b62241fa07d707d1b0661f86484fddd72c8f75c9,
+    0x001e6d3e3aeafa773946c49cf4bb6d46f5171a380f9bc9f86a03491e45b2ec12,
+    0x0009cbcac248f8a7498214c27710de804fdc06379e4b22d6101697c1ede60bde,
+    0x000c760e06041abdcfe6e27e40ba3667ca06fbcc327ff4c2adbe7f97836c6e07,
+]
+
+valid = 0
+invalid = 0
+for i, x in enumerate(xs):
+    y_squared = (pow(x, 3, p) + 7) % p
+    euler = pow(y_squared, (p - 1) // 2, p)
+    if euler == 1:
+        valid += 1
+    else:
+        invalid += 1
+        print(f"DP[{i}] INVALID: x = {hex(x)}")
+
+print(f"\nValid: {valid}/{len(xs)}, Invalid: {invalid}/{len(xs)}")
