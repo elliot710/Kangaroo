@@ -14,7 +14,7 @@ using namespace metal;
 
 // These must match Constants.h!
 #define NB_JUMP 32
-#define NB_RUN 8
+#define NB_RUN 8       // Test with lower value
 #define GPU_GRP_SIZE 128
 #ifdef USE_SYMMETRY
 #define KSIZE 12   // 4 px + 4 py + 3 dist + 1 (symmetry) = 12
@@ -34,6 +34,13 @@ constant uint64_t P_0 = 0xFFFFFFFEFFFFFC2FULL;
 constant uint64_t P_1 = 0xFFFFFFFFFFFFFFFFULL;
 constant uint64_t P_2 = 0xFFFFFFFFFFFFFFFFULL;
 constant uint64_t P_3 = 0xFFFFFFFFFFFFFFFFULL;
+
+// Curve order N (for ModNegK1order)
+// N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
+constant uint64_t N_0 = 0xBFD25E8CD0364141ULL;
+constant uint64_t N_1 = 0xBAAEDCE6AF48A03BULL;
+constant uint64_t N_2 = 0xFFFFFFFFFFFFFFFEULL;
+constant uint64_t N_3 = 0xFFFFFFFFFFFFFFFFULL;
 
 // MM64: -1/P mod 2^64
 constant uint64_t MM64 = 0xD838091DD2253531ULL;
@@ -658,6 +665,9 @@ kernel void computeKangaroos(
     uint64_t dist[GPU_GRP_SIZE][3];  // 192-bit distance
     uint64_t dx[GPU_GRP_SIZE][4];
     uint64_t dy[4], rx[4], ry[4], _s[4], _p[4];
+#ifdef USE_SYMMETRY
+    uint64_t lastJump[GPU_GRP_SIZE];
+#endif
     
     // Load
     for(int g = 0; g < GPU_GRP_SIZE; g++) {
@@ -675,12 +685,19 @@ kernel void computeKangaroos(
         dist[g][0] = kangaroos[base + 8 * threadsPerGroup.x];
         dist[g][1] = kangaroos[base + 9 * threadsPerGroup.x];
         dist[g][2] = kangaroos[base + 10 * threadsPerGroup.x];
+#ifdef USE_SYMMETRY
+        lastJump[g] = kangaroos[base + 11 * threadsPerGroup.x];
+#endif
     }
     
     // Run
     for(int run = 0; run < NB_RUN; run++) {
         for(int g = 0; g < GPU_GRP_SIZE; g++) {
             uint32_t jmp = (uint32_t)px[g][0] & (NB_JUMP - 1);
+#ifdef USE_SYMMETRY
+            // Prevent cycles: don't use the same jump twice in a row
+            if(jmp == lastJump[g]) jmp = (jmp + 1) & (NB_JUMP - 1);
+#endif
             ModSub256(dx[g], px[g], jumpPx + jmp * 4);
         }
         
@@ -688,6 +705,10 @@ kernel void computeKangaroos(
         
         for(int g = 0; g < GPU_GRP_SIZE; g++) {
             uint32_t jmp = (uint32_t)px[g][0] & (NB_JUMP - 1);
+#ifdef USE_SYMMETRY
+            if(jmp == lastJump[g]) jmp = (jmp + 1) & (NB_JUMP - 1);
+            lastJump[g] = jmp;
+#endif
             constant uint64_t* jPxPtr = jumpPx + jmp * 4;
             constant uint64_t* jPyPtr = jumpPy + jmp * 4;
             constant uint64_t* jDPtr = jumpDist + jmp * 3;  // 192-bit = 3 limbs
@@ -707,6 +728,35 @@ kernel void computeKangaroos(
             Load256(py[g], ry);
             
             Add192(dist[g], jDPtr);
+            
+#ifdef USE_SYMMETRY
+            // Symmetry optimization: if Y > P/2, negate Y and distance
+            // This works for any puzzle size from small to large
+            uint64_t needFlip = py[g][3] >> 63;  // 1 if high bit set (Y > P/2)
+            
+            // Always compute negated Y: negY = P - py
+            uint64_t borrow = 0;
+            uint64_t negY0 = sub_borrow_out(P_0, py[g][0], borrow);
+            uint64_t negY1 = sub_borrow_in_out(P_1, py[g][1], borrow);
+            uint64_t negY2 = sub_borrow_in_out(P_2, py[g][2], borrow);
+            uint64_t negY3 = sub_borrow_in_out(P_3, py[g][3], borrow);
+            
+            // Always compute negated distance: negD = -dist (two's complement)
+            // CPU will detect negative via high bit and apply ModNegK1order
+            borrow = 0;
+            uint64_t negD0 = sub_borrow_out(0, dist[g][0], borrow);
+            uint64_t negD1 = sub_borrow_in_out(0, dist[g][1], borrow);
+            uint64_t negD2 = sub_borrow_in_out(0, dist[g][2], borrow);
+            
+            // Branchless selection using Metal's select()
+            py[g][0] = select(py[g][0], negY0, needFlip != 0);
+            py[g][1] = select(py[g][1], negY1, needFlip != 0);
+            py[g][2] = select(py[g][2], negY2, needFlip != 0);
+            py[g][3] = select(py[g][3], negY3, needFlip != 0);
+            dist[g][0] = select(dist[g][0], negD0, needFlip != 0);
+            dist[g][1] = select(dist[g][1], negD1, needFlip != 0);
+            dist[g][2] = select(dist[g][2], negD2, needFlip != 0);
+#endif
             
             if ((px[g][3] & dpMask) == 0) {
                 uint32_t pos = atomic_fetch_add_explicit(foundCount, 1, memory_order_relaxed);
@@ -739,5 +789,8 @@ kernel void computeKangaroos(
         kangaroos[base + 8 * threadsPerGroup.x] = dist[g][0];
         kangaroos[base + 9 * threadsPerGroup.x] = dist[g][1];
         kangaroos[base + 10 * threadsPerGroup.x] = dist[g][2];
+#ifdef USE_SYMMETRY
+        kangaroos[base + 11 * threadsPerGroup.x] = lastJump[g];
+#endif
     }
 }
