@@ -1,0 +1,70 @@
+# Makefile for Kangaroo Windows cross-compile (CPU-only)
+# Cross-compile from macOS to Windows using MinGW-w64
+#
+# Usage:
+#   make -f Makefile.windows          # Build Windows EXE
+#   make -f Makefile.windows clean    # Clean build files
+
+# Cross-compiler settings
+CXX = x86_64-w64-mingw32-g++
+
+# Flags - CPU only, static linking for standalone EXE
+CXXFLAGS = -O3 -std=c++17 -Wall -Wextra -DWIN32 -D_WIN32
+LDFLAGS = -static -static-libgcc -static-libstdc++ -lpthread
+
+# Directories
+SRCDIR = .
+SECPDIR = SECPK1
+OBJDIR = obj_windows
+
+# Source files
+SRCS = main.cpp \
+       Kangaroo.cpp \
+       Thread.cpp \
+       HashTable.cpp \
+       Timer.cpp \
+       Check.cpp \
+       Network.cpp \
+       Backup.cpp \
+       Merge.cpp \
+       PartMerge.cpp
+
+SECP_SRCS = $(SECPDIR)/Int.cpp \
+            $(SECPDIR)/IntGroup.cpp \
+            $(SECPDIR)/IntMod.cpp \
+            $(SECPDIR)/Point.cpp \
+            $(SECPDIR)/Random.cpp \
+            $(SECPDIR)/SECP256K1.cpp
+
+# Object files
+OBJS = $(patsubst %.cpp,$(OBJDIR)/%.o,$(notdir $(SRCS)))
+SECP_OBJS = $(patsubst %.cpp,$(OBJDIR)/%.o,$(notdir $(SECP_SRCS)))
+
+# Target
+TARGET = Kangaroo.exe
+
+# Default target
+all: $(OBJDIR) $(TARGET)
+
+# Create object directory
+$(OBJDIR):
+	mkdir -p $(OBJDIR)
+
+# Compile C++ sources
+$(OBJDIR)/%.o: $(SRCDIR)/%.cpp | $(OBJDIR)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# Compile SECP256K1 sources
+$(OBJDIR)/%.o: $(SECPDIR)/%.cpp | $(OBJDIR)
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+# Link
+$(TARGET): $(OBJS) $(SECP_OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
+
+# Clean
+clean:
+	rm -rf $(OBJDIR)
+	rm -f $(TARGET)
+
+.PHONY: all clean

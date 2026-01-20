@@ -21,8 +21,8 @@
 // Release number
 #define RELEASE "2.2"
 
-// Use symmetry
-//#define USE_SYMMETRY
+// Use symmetry - reduces expected ops by sqrt(2) (~41% speedup)
+#define USE_SYMMETRY
 
 // Number of random jumps
 // Max 512 for the GPU

@@ -751,12 +751,17 @@ bool MetalEngine::Launch(std::vector<ITEM>& hashFound, bool spinWait) {
             it.x.bits64[3] = ((uint64_t)outputs[i].x[7] << 32) | outputs[i].x[6];
             it.x.bits64[4] = 0;
 
-            // 192-bit distance
+            // 192-bit distance - detect negative (sign bit at bit 191)
             it.d.bits64[0] = ((uint64_t)outputs[i].dist[1] << 32) | outputs[i].dist[0];
             it.d.bits64[1] = ((uint64_t)outputs[i].dist[3] << 32) | outputs[i].dist[2];
             it.d.bits64[2] = ((uint64_t)outputs[i].dist[5] << 32) | outputs[i].dist[4];
             it.d.bits64[3] = 0;
             it.d.bits64[4] = 0;
+            
+            // If distance is negative (bit 191 set), convert to positive via ModNegK1order
+            if (it.d.bits64[2] & 0x8000000000000000ULL) {
+                it.d.ModNegK1order();
+            }
 
             if (it.kIdx % 2 == WILD) {
                 it.d.ModSubK1order(&wildOffset);
@@ -834,14 +839,18 @@ bool MetalEngine::GetGridSize(int gpuId, int* x, int* y) {
                 return false;
             }
 
-            // For Apple Silicon M4 Pro - balance performance vs initialization time
+            // For Apple Silicon M4 Pro/Max - maximize GPU utilization
+            // M4 has 10 cores, M4 Pro has 20 cores, M4 Max has 40 cores
+            // Each core can handle multiple threadgroups efficiently
             if (*x <= 0) {
-                // Number of threadgroups - 128 for good GPU utilization
-                *x = 128;
+                // Number of threadgroups - 512 for M4 Pro (20 cores * ~25 per core)
+                // This gives better GPU saturation for long-running searches
+                *x = 512;
             }
             if (*y <= 0) {
-                // Threads per threadgroup - 128 for full SIMD utilization
-                *y = 128;
+                // Threads per threadgroup - 256 for full SIMD utilization
+                // M4 supports up to 1024 threads per threadgroup
+                *y = 256;
             }
         }
 

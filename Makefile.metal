@@ -12,15 +12,13 @@ OBJCXX = clang++
 METAL = xcrun -sdk macosx metal
 METALLIB = xcrun -sdk macosx metallib
 
-# Flags
-CXXFLAGS = -O3 -std=c++17 -Wall -Wextra -DWITHMETAL -DWITHGPU
-OBJCXXFLAGS = -O3 -std=c++17 -Wall -Wextra -DWITHMETAL -DWITHGPU -fobjc-arc
+# Flags - Optimized for M4 and puzzle #135
+CXXFLAGS = -O3 -std=c++17 -Wall -Wextra -DWITHMETAL -DWITHGPU -DUSE_SYMMETRY -march=native
+OBJCXXFLAGS = -O3 -std=c++17 -Wall -Wextra -DWITHMETAL -DWITHGPU -DUSE_SYMMETRY -fobjc-arc
 LDFLAGS = -framework Metal -framework Foundation -framework CoreGraphics
 
-# Optional: Enable symmetry optimization
-# Uncomment the following line to enable symmetry mode
-# CXXFLAGS += -DUSE_SYMMETRY
-# OBJCXXFLAGS += -DUSE_SYMMETRY
+# USE_SYMMETRY is enabled - reduces expected operations by sqrt(2) (~41% speedup)
+# This is critical for large puzzles like #135
 
 # Directories
 SRCDIR = .
@@ -69,9 +67,9 @@ all: $(OBJDIR) $(METAL_METALLIB) $(TARGET)
 $(OBJDIR):
 	mkdir -p $(OBJDIR)
 
-# Compile Metal shader to AIR
+# Compile Metal shader to AIR (with USE_SYMMETRY)
 $(METAL_AIR): $(METAL_SHADER) | $(OBJDIR)
-	$(METAL) -c $(METAL_SHADER) -o $(METAL_AIR)
+	$(METAL) -c -DUSE_SYMMETRY $(METAL_SHADER) -o $(METAL_AIR)
 
 # Link AIR to metallib
 $(METAL_METALLIB): $(METAL_AIR)
