@@ -30,8 +30,9 @@
 #define NB_JUMP 64
 
 // GPU group size
-// H200 optimization: 256 for better occupancy on Hopper architecture
-#define GPU_GRP_SIZE 256
+// Lower values reduce register pressure and stack spills
+// 128 balances occupancy vs parallelism on modern GPUs
+#define GPU_GRP_SIZE 128
 
 // GPU number of run per kernel call
 // H200 optimization: 256 runs for optimal throughput
