@@ -19,20 +19,23 @@
 #define CONSTANTSH
 
 // Release number
-#define RELEASE "2.2"
+#define RELEASE "2.2-H200"
 
 // Use symmetry - reduces expected ops by sqrt(2) (~41% speedup)
 #define USE_SYMMETRY
 
 // Number of random jumps
 // Max 512 for the GPU
-#define NB_JUMP 32
+// H200 optimization: Use 64 jumps for better cache utilization
+#define NB_JUMP 64
 
 // GPU group size
-#define GPU_GRP_SIZE 128
+// H200 optimization: 256 for better occupancy on Hopper architecture
+#define GPU_GRP_SIZE 256
 
 // GPU number of run per kernel call
-#define NB_RUN 128
+// H200 optimization: 256 runs for better throughput
+#define NB_RUN 256
 
 // Kangaroo type
 #define TAME 0  // Tame kangaroo

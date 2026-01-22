@@ -118,9 +118,14 @@ int _ConvertSMVer2Cores(int major,int minor) {
     { 0x60,  64 },
     { 0x61, 128 },
     { 0x62, 128 },
-    { 0x70,  64 },
+    { 0x70,  64 }, // Volta
     { 0x72,  64 },
-    { 0x75,  64 },
+    { 0x75,  64 }, // Turing
+    { 0x80, 64 },  // Ampere GA100
+    { 0x86, 128 }, // Ampere GA102
+    { 0x87, 128 }, // Ampere GA10B
+    { 0x89, 128 }, // Ada Lovelace
+    { 0x90, 128 }, // Hopper H100/H200
     { -1, -1 } };
 
   int index = 0;
@@ -133,7 +138,11 @@ int _ConvertSMVer2Cores(int major,int minor) {
     index++;
   }
 
-  return 0;
+  // Default for unknown architectures - assume 128 cores
+  if(major >= 9) return 128;  // Hopper and newer
+  if(major >= 8) return 128;  // Ampere and newer
+  
+  return 64;
 
 }
 
@@ -298,9 +307,26 @@ bool GPUEngine::GetGridSize(int gpuId,int *x,int *y) {
     cudaDeviceProp deviceProp;
     cudaGetDeviceProperties(&deviceProp,gpuId);
 
-    if(*x <= 0) *x = 2 * deviceProp.multiProcessorCount;
-    if(*y <= 0) *y = 2 * _ConvertSMVer2Cores(deviceProp.major,deviceProp.minor);
-    if(*y <= 0) *y = 128;
+    int coresPerSM = _ConvertSMVer2Cores(deviceProp.major,deviceProp.minor);
+    
+    // H200/Hopper optimization: Use higher grid dimensions
+    // H200 has 132 SMs, so we use 2x multiplier for blocks
+    // and optimize thread count for better occupancy
+    if(deviceProp.major >= 9) {
+      // Hopper architecture (H100/H200)
+      if(*x <= 0) *x = 2 * deviceProp.multiProcessorCount;
+      if(*y <= 0) *y = 256;  // Optimal thread block size for Hopper
+    } else if(deviceProp.major >= 8) {
+      // Ampere architecture
+      if(*x <= 0) *x = 2 * deviceProp.multiProcessorCount;
+      if(*y <= 0) *y = 2 * coresPerSM;
+      if(*y <= 0) *y = 256;
+    } else {
+      // Older architectures
+      if(*x <= 0) *x = 2 * deviceProp.multiProcessorCount;
+      if(*y <= 0) *y = 2 * coresPerSM;
+      if(*y <= 0) *y = 128;
+    }
 
   }
 
