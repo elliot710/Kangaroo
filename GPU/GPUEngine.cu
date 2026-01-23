@@ -700,6 +700,12 @@ bool GPUEngine::Launch(std::vector<ITEM> &hashFound,bool spinWait) {
     it.d.bits64[2] = d[2];
     it.d.bits64[3] = 0;
     it.d.bits64[4] = 0;
+    
+    // If distance is negative (bit 191 set from symmetry negation), convert to positive
+    if (it.d.bits64[2] & 0x8000000000000000ULL) {
+        it.d.ModNegK1order();
+    }
+    
     if(it.kIdx % 2 == WILD) it.d.ModSubK1order(&wildOffset);
 
     hashFound.push_back(it);
