@@ -19,14 +19,14 @@
 #define CONSTANTSH
 
 // Release number
-#define RELEASE "2.2-H200"
+#define RELEASE "2.2-CUDA"
 
 // Use symmetry - reduces expected ops by sqrt(2) (~41% speedup)
 #define USE_SYMMETRY
 
 // Number of random jumps
 // Max 512 for the GPU
-// H200 optimization: Use 64 jumps for better cache utilization
+// CUDA optimization: Use 64 jumps for better cache utilization
 #define NB_JUMP 64
 
 // GPU group size

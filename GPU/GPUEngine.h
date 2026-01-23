@@ -22,13 +22,15 @@
 #include "../Constants.h"
 #include "../SECPK1/SECP256k1.h"
 
+// KSIZE: x[4] + y[4] + dist[3] + lastJump[1] = 12 with symmetry, 11 without
 #ifdef USE_SYMMETRY
-#define KSIZE 11
+#define KSIZE 12
 #else
-#define KSIZE 10
+#define KSIZE 11
 #endif
 
-#define ITEM_SIZE   56
+// ITEM_SIZE: x[32] + dist[24] + kIdx[8] = 64 bytes for 192-bit distance
+#define ITEM_SIZE   64
 #define ITEM_SIZE32 (ITEM_SIZE/4)
 
 typedef struct {
