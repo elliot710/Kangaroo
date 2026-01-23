@@ -90,7 +90,7 @@ __device__ void ComputeKangaroos(uint64_t *kangaroos,uint32_t maxFound,uint32_t 
 
 #ifdef USE_SYMMETRY
       if(ModPositive256(py[g]))
-        ModNeg256Order(dist[g]);
+        ModNeg192(dist[g]);
 #endif
 
       if((px[g][3] & dpMask) == 0) {

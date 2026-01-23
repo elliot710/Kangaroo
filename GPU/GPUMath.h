@@ -547,6 +547,20 @@ __device__ bool ModPositive256(uint64_t *r) {
 
 }
 
+// Negate 192-bit distance (two's complement)
+// For symmetry: when Y > P/2, negate both Y and distance
+__device__ void ModNeg192(uint64_t* r) {
+  // Two's complement: -r = ~r + 1
+  uint64_t t[3];
+  USUBO(t[0], 0ULL, r[0]);
+  USUBC(t[1], 0ULL, r[1]);
+  USUB(t[2], 0ULL, r[2]);
+  r[0] = t[0];
+  r[1] = t[1];
+  r[2] = t[2];
+}
+
+// Legacy 128-bit version for compatibility
 __device__ void ModNeg256Order(uint64_t* r) {
 
   uint64_t t[4];
