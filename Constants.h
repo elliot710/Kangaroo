@@ -35,8 +35,8 @@
 #define GPU_GRP_SIZE 128
 
 // GPU number of run per kernel call
-// H200 optimization: 256 runs for optimal throughput
-#define NB_RUN 256
+// Optimal: 512 runs for RTX 20/30/40 series
+#define NB_RUN 512
 
 // Kangaroo type
 #define TAME 0  // Tame kangaroo

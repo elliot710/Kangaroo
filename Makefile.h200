@@ -48,7 +48,7 @@ LFLAGS     = -lpthread -L$(CUDA)/lib64 -lcudart
 
 #--------------------------------------------------------------------
 # CUDA compilation rules
-# Optimized for H200 with maximum register usage and optimal block size
+# Remove maxrregcount to allow compiler to optimize register usage
 #--------------------------------------------------------------------
 
 ifdef debug
@@ -56,7 +56,7 @@ $(OBJDIR)/GPU/GPUEngine.o: GPU/GPUEngine.cu
 	$(NVCC) -G -maxrregcount=0 --ptxas-options=-v --compile --compiler-options -fPIC -ccbin $(CXXCUDA) -m64 -g -I$(CUDA)/include -gencode=arch=compute_$(CCAP),code=sm_$(CCAP) -o $(OBJDIR)/GPU/GPUEngine.o -c GPU/GPUEngine.cu
 else
 $(OBJDIR)/GPU/GPUEngine.o: GPU/GPUEngine.cu
-	$(NVCC) --maxrregcount=64 --ptxas-options=-v --compile --compiler-options "-fPIC -O3" -ccbin $(CXXCUDA) -m64 -O3 -I$(CUDA)/include \
+	$(NVCC) --maxrregcount=0 --ptxas-options=-v --compile --compiler-options "-fPIC -O3" -ccbin $(CXXCUDA) -m64 -O3 -I$(CUDA)/include \
 	-gencode=arch=compute_$(CCAP),code=sm_$(CCAP) \
 	--use_fast_math \
 	-o $(OBJDIR)/GPU/GPUEngine.o -c GPU/GPUEngine.cu

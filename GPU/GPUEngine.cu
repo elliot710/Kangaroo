@@ -390,11 +390,10 @@ void GPUEngine::PrintCudaInfo() {
 
     cudaDeviceProp deviceProp;
     cudaGetDeviceProperties(&deviceProp,i);
-    printf("GPU #%d %s (%dx%d cores) (Cap %d.%d) (%.1f MB) (%s)\n",
+    printf("GPU #%d %s (%dx%d cores) (Cap %d.%d) (%.1f MB) (Default)\n",
       i,deviceProp.name,deviceProp.multiProcessorCount,
       _ConvertSMVer2Cores(deviceProp.major,deviceProp.minor),
-      deviceProp.major,deviceProp.minor,(double)deviceProp.totalGlobalMem / 1048576.0,
-      sComputeMode[deviceProp.computeMode]);
+      deviceProp.major,deviceProp.minor,(double)deviceProp.totalGlobalMem / 1048576.0);
 
   }
 
